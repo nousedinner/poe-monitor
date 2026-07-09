@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POE 监控系统 - 开发文档</title>
+    <style>
+        :root {
+            --primary: #00e0ff;
+            --secondary: #ff66cc;
+            --accent: #af6025;
+            --bg: #0d0f1a;
+            --card: rgba(20, 30, 50, 0.8);
+            --text: #e0f0ff;
+            --muted: #aac0dd;
+            --border: rgba(255, 255, 255, 0.1);
+            --success: #a0ff66;
+            --warning: #ffaa33;
+            --danger: #ff4d6d;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: var(--card);
+            border-radius: 20px;
+            padding: 40px;
+            margin-bottom: 30px;
+            border: 1px solid var(--border);
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: var(--muted);
+            font-size: 1.2rem;
+        }
+
+        .nav {
+            background: var(--card);
+            border-radius: 15px;
+            padding: 15px 20px;
+            margin-bottom: 30px;
+            border: 1px solid var(--border);
+            position: sticky;
+            top: 20px;
+            z-index: 100;
+        }
+
+        .nav ul {
+            display: flex;
+            list-style: none;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .nav a {
+            color: var(--primary);
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+
+        .nav a:hover {
+            background: rgba(0, 224, 255, 0.1);
+            color: #fff;
+        }
+
+        section {
+            background: var(--card);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+            border: 1px solid var(--border);
+        }
+
+        h2 {
+            color: var(--primary);
+            font-size: 1.8rem;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        h3 {
+            color: var(--secondary);
+            font-size: 1.4rem;
+            margin: 20px 0 15px;
+        }
+
+        h4 {
+            color: var(--accent);
+            font-size: 1.1rem;
+            margin: 15px 0 10px;
+        }
+
+        p {
+            margin-bottom: 15px;
+            color: var(--muted);
+        }
+
+        code {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Consolas', monospace;
+            color: var(--success);
+        }
+
+        pre {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 15px;
+            border-radius: 10px;
+            overflow-x: auto;
+            margin: 15px 0;
+            border: 1px solid var(--border);
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+
+        .info-card {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 15px;
+            padding: 20px;
+            border: 1px solid var(--border);
+        }
+
+        .info-card h4 {
+            margin-top: 0;
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 15px;
+            font-size: 0.85rem;
+            margin: 2px;
+            font-weight: 500;
+        }
+
+        .tag-primary { background: rgba(0, 224, 255, 0.2); color: var(--primary); }
+        .tag-success { background: rgba(160, 255, 102, 0.2); color: var(--success); }
+        .tag-warning { background: rgba(255, 170, 51, 0.2); color: var(--warning); }
+        .tag-danger { background: rgba(255, 77, 109, 0.2); color: var(--danger); }
+
+        .bug-item {
+            background: rgba(255, 77, 109, 0.1);
+            border-left: 4px solid var(--danger);
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 0 10px 10px 0;
+        }
+
+        .solution-item {
+            background: rgba(160, 255, 102, 0.1);
+            border-left: 4px solid var(--success);
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 0 10px 10px 0;
+        }
+
+        .warning-item {
+            background: rgba(255, 170, 51, 0.1);
+            border-left: 4px solid var(--warning);
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 0 10px 10px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            background: rgba(0, 0, 0, 0.2);
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        tr:hover {
+            background: rgba(0, 224, 255, 0.05);
+        }
+
+        .architecture {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin: 20px 0;
+        }
+
+        .arch-box {
+            background: var(--card);
+            border: 2px solid var(--border);
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            min-width: 200px;
+        }
+
+        .arch-box h4 {
+            margin: 0 0 10px;
+            color: var(--primary);
+        }
+
+        .arch-arrow {
+            font-size: 2rem;
+            color: var(--muted);
+        }
+
+        .timeline {
+            position: relative;
+            padding-left: 30px;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: var(--border);
+        }
+
+        .timeline-item {
+            position: relative;
+            margin-bottom: 20px;
+            padding-left: 20px;
+        }
+
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -34px;
+            top: 5px;
+            width: 10px;
+            height: 10px;
+            background: var(--primary);
+            border-radius: 50%;
+        }
+
+        .timeline-date {
+            color: var(--muted);
+            font-size: 0.9rem;
+            margin-bottom: 5px;
+        }
+
+        footer {
+            text-align: center;
+            padding: 30px;
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        @media (max-width: 768px) {
+            .nav ul {
+                flex-direction: column;
+                gap: 10px;
+            }
+            
+            h1 {
+                font-size: 2rem;
+            }
+            
+            .architecture {
+                flex-direction: column;
+            }
+            
+            .arch-arrow {
+                transform: rotate(90deg);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>POE 监控系统</h1>
+            <p class="subtitle">流放之路物品市集监控与价格趋势分析平台</p>
+            <p style="margin-top: 20px; color: var(--muted);">
+                版本: v1.0 | 最后更新: 2026-04-19 | 作者: AI + zzy
+            </p>
+        </header>
+
+        <nav class="nav">
+            <ul>
+                <li><a href="#overview">项目概述</a></li>
+                <li><a href="#architecture">系统架构</a></li>
+                <li><a href="#features">核心功能</a></li>
+                <li><a href="#tech">技术实现</a></li>
+                <li><a href="#bugs">踩坑记录</a></li>
+                <li><a href="#security">安全经验</a></li>
+                <li><a href="#dev">开发经验</a></li>
+            </ul>
+        </nav>
+
+        <section id="overview">
+            <h2>📋 项目概述</h2>
+            
+            <p>POE 监控系统是一个为《流放之路》（Path of Exile）游戏玩家设计的物品市集监控工具。系统能够：</p>
+            
+            <div class="card-grid">
+                <div class="info-card">
+                    <h4>🔍 全服搜索</h4>
+                    <p>支持按物品名称、类型、词缀等条件搜索全服在售物品，实时获取价格信息。</p>
+                    <span class="tag tag-primary">实时数据</span>
+                    <span class="tag tag-primary">多条件筛选</span>
+                </div>
+                
+                <div class="info-card">
+                    <h4>📊 价格监控</h4>
+                    <p>定时扫描目标物品，记录价格变化，生成24小时和7天价格趋势图表。</p>
+                    <span class="tag tag-success">定时任务</span>
+                    <span class="tag tag-success">趋势分析</span>
+                </div>
+                
+                <div class="info-card">
+                    <h4>💰 交易统计</h4>
+                    <p>统计物品上架和售出数量，帮助玩家了解市场活跃度和物品流动性。</p>
+                    <span class="tag tag-warning">指纹去重</span>
+                    <span class="tag tag-warning">售出追踪</span>
+                </div>
+                
+                <div class="info-card">
+                    <h4>🔐 安全认证</h4>
+                    <p>支持用户登录、JWT认证，保护用户隐私和操作安全。</p>
+                    <span class="tag tag-danger">JWT认证</span>
+                    <span class="tag tag-danger">密码加密</span>
+                </div>
+            </div>
+        </section>
+
+        <section id="architecture">
+            <h2>🏗️ 系统架构</h2>
+            
+            <h3>技术栈</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>层级</th>
+                        <th>技术</th>
+                        <th>说明</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>前端</td>
+                        <td>Vue.js 3 + 原生JavaScript</td>
+                        <td>响应式设计，极光玻璃主题CSS</td>
+                    </tr>
+                    <tr>
+                        <td>后端</td>
+                        <td>Flask + SQLAlchemy</td>
+                        <td>RESTful API，ORM数据库操作</td>
+                    </tr>
+                    <tr>
+                        <td>数据库</td>
+                        <td>MySQL</td>
+                        <td>存储监控目标、价格快照、事件记录</td>
+                    </tr>
+                    <tr>
+                        <td>部署</td>
+                        <td>Docker + Nginx</td>
+                        <td>容器化部署，反向代理</td>
+                    </tr>
+                    <tr>
+                        <td>外部API</td>
+                        <td>腾讯POE市集API</td>
+                        <td>获取物品数据和价格信息</td>
+                    </tr>
+                </tbody>
+            </table>
+            
+            <h3>架构图</h3>
+            <div class="architecture">
+                <div class="arch-box">
+                    <h4>前端</h4>
+                    <p>Vue.js / JavaScript<br>极光玻璃主题CSS</p>
+                </div>
+                
+                <div class="arch-arrow">→</div>
+                
+                <div class="arch-box">
+                    <h4>Nginx</h4>
+                    <p>反向代理<br>静态文件服务</p>
+                </div>
+                
+                <div class="arch-arrow">→</div>
+                
+                <div class="arch-box">
+                    <h4>Flask API</h4>
+                    <p>RESTful接口<br>业务逻辑处理</p>
+                </div>
+                
+                <div class="arch-arrow">→</div>
+                
+                <div class="arch-box">
+                    <h4>MySQL</h4>
+                    <p>数据存储<br>事务处理</p>
+                </div>
+                
+                <div class="arch-arrow">←</div>
+                
+                <div class="arch-box">
+                    <h4>定时任务</h4>
+                    <p>价格扫描<br>趋势更新</p>
+                </div>
+            </div>
+            
+            <h3>目录结构</h3>
+            <pre><code>/home/zzy/docker/poe/
+├── app/                    # Flask应用
+│   ├── api.py             # API路由
+│   ├── models.py          # 数据模型
+│   ├── scheduler.py       # 定时任务
+│   ├── auth.py            # 认证模块
+│   ├── utils.py           # 工具函数
+│   └── poe_api.py         # POE API封装
+├── data/                   # 数据文件
+│   ├── items.json         # 物品数据库
+│   ├── stats.json         # 词缀数据库
+│   └── filters.json       # 筛选器配置
+├── docker-compose.yml     # Docker配置
+├── Dockerfile             # 镜像构建
+└── requirements.txt       # Python依赖
+
+/var/www/poe/              # 前端文件
+├── index.html             # 主页
+├── global_search.html     # 全服搜索页
+├── style.css              # 主页样式
+├── global_search.css      # 搜索页样式
+└── *.json                 # 静态数据文件</code></pre>
+        </section>
+
+        <section id="features">
+            <h2>🎯 核心功能</h2>
+            
+            <h3>1. 全服搜索系统</h3>
+            <p>全服搜索页面（<code>global_search.html</code>）实现了类似官方市集的搜索体验。</p>
+            
+            <h4>关键技术点</h4>
+            <div class="info-card">
+                <p><strong>查询构建（<code>bQ()</code>函数）</strong>：前端收集所有筛选条件，构建符合腾讯API格式的查询对象。</p>
+                <pre><code>// 构建查询
+function bQ(){
+  var q = {}, f = {};
+  var name = document.getElementById('si0').value.trim();
+  if(name) q.name = {option: name};
+  
+  // 收集词缀条件
+  var stats = [];
+  document.querySelectorAll('.sg').forEach(function(sg){
+    var sfs = [];
+    sg.querySelectorAll('.sr2').forEach(function(sr){
+      // 检查是否有select下拉框（option类型）
+      var sel = document.getElementById('sts-'+sn);
+      if(sel && sel.style.display!=='none' && sel.value){
+        sf.value = {option: parseInt(sel.value)};
+      } else {
+        // min/max类型
+        sf.value = {min: smin, max: smax};
+      }
+    });
+  });
+  
+  return q;
+}</code></pre>
+            </div>
+            
+            <h3>2. 监控系统</h3>
+            <p>监控系统允许用户添加监控目标，定时扫描价格变化，生成趋势图表。</p>
+            
+            <h4>扫描流程</h4>
+            <ol style="color: var(--muted); margin-left: 20px; margin-bottom: 15px;">
+                <li>获取所有启用的监控目标</li>
+                <li>检查每个目标的扫描间隔</li>
+                <li>调用腾讯API获取最新价格</li>
+                <li>计算价格趋势（移动平均）</li>
+                <li>检测上架/售出事件（指纹去重）</li>
+                <li>保存快照和事件记录</li>
+            </ol>
+            
+            <h3>3. 价格趋势分析</h3>
+            <p>价格趋势功能通过Canvas绘制平滑曲线，展示物品的历史价格变化。</p>
+            
+            <h4>实现细节</h4>
+            <ul style="color: var(--muted); margin-left: 20px; margin-bottom: 15px;">
+                <li>数据缓存：使用<code>trendCache</code>对象缓存趋势数据</li>
+                <li>平滑曲线：使用二次贝塞尔曲线绘制</li>
+                <li>响应式：支持高DPI屏幕（Retina）</li>
+                <li>实时更新：后台定时更新趋势数据</li>
+            </ul>
+            
+            <h3>4. 上架/售出统计</h3>
+            <p>通过物品指纹（fingerprint）去重，追踪物品的上架和售出状态。</p>
+            
+            <h4>指纹算法</h4>
+            <pre><code>def generate_fingerprint(item_data):
+    """生成物品指纹用于去重"""
+    name = item_data.get('name', '')
+    base_type = item_data.get('typeLine', '')
+    
+    # 提取词缀并排序
+    mods = []
+    for mod in item_data.get('explicitMods', []):
+        mods.append(mod if isinstance(mod, str) else mod.get('text', ''))
+    
+    fingerprint_str = f"{name}|{base_type}|{json.dumps(sorted(mods))}"
+    return hashlib.md5(fingerprint_str.encode()).hexdigest()</code></pre>
+        </section>
+
+        <section id="tech">
+            <h2>🔧 技术实现</h2>
+            
+            <h3>前端技术</h3>
+            
+            <h4>极光玻璃主题</h4>
+            <p>采用CSS变量和backdrop-filter实现现代玻璃拟态效果。</p>
+            <pre><code>:root {
+    --primary-color: #00e0ff;
+    --card-bg: rgba(20, 30, 50, 0.01);
+    --blur-amount: 0.1px;
+}
+
+.card {
+    background: var(--card-bg);
+    backdrop-filter: blur(var(--blur-amount));
+    border-radius: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}</code></pre>
+            
+            <h3>后端技术</h3>
+            
+            <h4>Flask应用结构</h4>
+            <p>采用Blueprint组织路由，分离关注点。</p>
+            <pre><code># api.py - 主要API路由
+api_bp = Blueprint('api', __name__)
+
+@api_bp.route('/search', methods=['POST'])
+@jwt_required()
+def search():
+    """全服搜索接口"""
+    data = request.json
+    query = data.get('query', {})
+    # ... 处理搜索逻辑
+    
+@api_bp.route('/targets', methods=['GET'])
+@jwt_required()
+def get_targets():
+    """获取监控目标列表"""
+    user_id = get_jwt_identity()
+    targets = MonitorTarget.query.filter_by(user_id=user_id).all()
+    return jsonify([t.to_dict() for t in targets])</code></pre>
+            
+            <h4>数据库设计</h4>
+            <table>
+                <thead>
+                    <tr>
+                        <th>表名</th>
+                        <th>用途</th>
+                        <th>关键字段</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>user</td>
+                        <td>用户账号</td>
+                        <td>username, password_hash, is_admin</td>
+                    </tr>
+                    <tr>
+                        <td>user_credential</td>
+                        <td>用户凭证</td>
+                        <td>encrypted_poesessid, encrypted_pt2gguin</td>
+                    </tr>
+                    <tr>
+                        <td>monitor_target</td>
+                        <td>监控目标</td>
+                        <td>query_id, query_params, scan_interval</td>
+                    </tr>
+                    <tr>
+                        <td>item_snapshot</td>
+                        <td>价格快照</td>
+                        <td>price, price_currency, fingerprint</td>
+                    </tr>
+                    <tr>
+                        <td>event</td>
+                        <td>事件记录</td>
+                        <td>event_type, item_name, price</td>
+                    </tr>
+                    <tr>
+                        <td>price_trend</td>
+                        <td>价格趋势</td>
+                        <td>top10_avg_prices, total, timestamp</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section id="bugs">
+            <h2>🐛 踩坑记录</h2>
+            
+            <p>以下是开发过程中遇到的主要问题和解决方案。</p>
+            
+            <div class="bug-item">
+                <h4>问题1: 技能石变体搜索返回500错误</h4>
+                <p><strong>现象</strong>：搜索"大法师之力量抽取"时返回500 Internal Server Error。</p>
+                <p><strong>原因</strong>：技能石变体在腾讯API中需要使用<code>{option, discriminator}</code>格式，而不是普通的<code>name</code>字段。</p>
+            </div>
+            
+            <div class="solution-item">
+                <h4>解决方案</h4>
+                <p>后端检测items.json中的<code>disc</code>字段，转换为正确格式：</p>
+                <pre><code># api.py - 技能石变体处理
+if entry.get('disc'):
+    query['type'] = {
+        'option': entry['type'],
+        'discriminator': entry['disc']
+    }
+    del query['name']  # 变体不需要name字段</code></pre>
+            </div>
+            
+            <div class="bug-item">
+                <h4>问题2: 技能石名称没有空格导致查找失败</h4>
+                <p><strong>现象</strong>：代码用<code>' ' in name</code>判断是否查找items.json，但"大法师之力量抽取"没有空格，跳过了查找。</p>
+            </div>
+            
+            <div class="solution-item">
+                <h4>解决方案</h4>
+                <p>去掉空格判断，直接查找items.json：</p>
+                <pre><code># 修改前
+if not raw_query.get('type') and ' ' in query['name']:
+
+# 修改后
+if not raw_query.get('type'):</code></pre>
+            </div>
+            
+            <div class="bug-item">
+                <h4>问题3: Option类型词缀显示为min/max输入框</h4>
+                <p><strong>现象</strong>：option类型词缀（如"焚界者基底词缀"）显示为数字输入框，而不是下拉选择框。</p>
+                <p><strong>原因</strong>：前端<code>addST()</code>函数硬编码了min/max输入框，没有检测词缀类型。</p>
+            </div>
+            
+            <div class="solution-item">
+                <h4>解决方案</h4>
+                <p>选择词缀后检测类型，option类型显示select下拉框：</p>
+                <pre><code>// selST() 函数
+function selST(n, el){
+  // 查找词缀详情
+  var modEntry = null;
+  AM.forEach(function(a){if(a.id===modId)modEntry=a;});
+  
+  if(modEntry && modEntry.option && modEntry.option.options){
+    // 有option → 隐藏min/max，显示select
+    minInput.style.display='none';
+    maxInput.style.display='none';
+    
+    var sel = document.createElement('select');
+    sel.innerHTML = '<option value="">选择...</option>';
+    modEntry.option.options.forEach(function(o){
+      sel.innerHTML += '<option value="'+o.id+'">'+o.text+'</option>';
+    });
+  }
+}</code></pre>
+            </div>
+            
+            <div class="bug-item">
+                <h4>问题4: Docker-compose密码被工具替换</h4>
+                <p><strong>现象</strong>：使用patch工具编辑docker-compose.yml时，敏感值被显示为<code>***</code>，patch后真实密码被替换成<code>***</code>，导致服务无法启动。</p>
+            </div>
+            
+            <div class="solution-item">
+                <h4>解决方案</h4>
+                <p><strong>铁律</strong>：docker-compose.yml必须用<code>write_file()</code>重写整个文件，不要用patch工具。</p>
+            </div>
+            
+            <div class="warning-item">
+                <h4>⚠️ 重要教训：绝对不能在没有明确告知的情况下修改用户密码</h4>
+                <p>调试时把zzy密码从qaz123..改成qaz123没告知，用户暴怒。完成工作后必须主动发消息通知用户验证。</p>
+            </div>
+        </section>
+
+        <section id="security">
+            <h2>🔐 安全经验</h2>
+            
+            <h3>权限管理</h3>
+            <div class="warning-item">
+                <h4>⚠️ 服务器安全教训</h4>
+                <p>在修改zzy用户的sudoers配置时，不小心删除了所有权限，导致需要root密码恢复。</p>
+                <p><strong>解决方案</strong>：使用Live USB挂载修改文件，恢复权限。</p>
+            </div>
+            
+            <h3>认证机制</h3>
+            <ul style="color: var(--muted); margin-left: 20px; margin-bottom: 15px;">
+                <li>使用JWT（JSON Web Token）进行用户认证</li>
+                <li>密码使用bcrypt加密存储</li>
+                <li>POESESSID使用Fernet对称加密存储</li>
+                <li>所有API接口都需要JWT认证</li>
+            </ul>
+            
+            <h3>数据安全</h3>
+            <ul style="color: var(--muted); margin-left: 20px; margin-bottom: 15px;">
+                <li>敏感配置使用环境变量（.env文件）</li>
+                <li>数据库密码、JWT密钥等不硬编码</li>
+                <li>定期备份数据库和配置文件</li>
+            </ul>
+        </section>
+
+        <section id="dev">
+            <h2>🛠️ 开发经验</h2>
+            
+            <h3>代码规范</h3>
+            <div class="card-grid">
+                <div class="info-card">
+                    <h4>1. 最小破坏原则</h4>
+                    <p>修改前备份，确保能回退。用户不懂代码，只能从使用者角度发现问题。</p>
+                </div>
+                
+                <div class="info-card">
+                    <h4>2. 逐条验证</h4>
+                    <p>不确定的标注"疑似"，不编造bug。用户对"编造bug"零容忍。</p>
+                </div>
+                
+                <div class="info-card">
+                    <h4>3. 安全编辑</h4>
+                    <p>Docker-compose用write_file重写，Vue/HTML模板不要用patch工具。</p>
+                </div>
+                
+                <div class="info-card">
+                    <h4>4. 最小改动</h4>
+                    <p>加功能最小改动：旧页面只加链接，新页面单独写。</p>
+                </div>
+            </div>
+            
+            <h3>测试方法</h3>
+            <ul style="color: var(--muted); margin-left: 20px; margin-bottom: 15px;">
+                <li>部署后必须验证核心功能（访问前端、测试API）</li>
+                <li>修改后端代码需要重建Docker容器：<code>docker compose up -d --build</code></li>
+                <li>修改前端nginx静态文件即时生效，不需要重启</li>
+                <li>用户只能从使用者角度发现问题，所以必须自己测试通过再告知用户</li>
+            </ul>
+            
+            <h3>备份策略</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>备份类型</th>
+                        <th>位置</th>
+                        <th>频率</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>完整备份</td>
+                        <td>/home/zzy/backups/</td>
+                        <td>重要修改前</td>
+                    </tr>
+                    <tr>
+                        <td>前端备份</td>
+                        <td>/var/www/poe/*.bak</td>
+                        <td>修改前自动</td>
+                    </tr>
+                    <tr>
+                        <td>后端备份</td>
+                        <td>/home/zzy/docker/poe/app/*.bak</td>
+                        <td>修改前自动</td>
+                    </tr>
+                    <tr>
+                        <td>数据库备份</td>
+                        <td>MySQL自动备份</td>
+                        <td>定期</td>
+                    </tr>
+                </tbody>
+            </table>
+            
+            <h3>常用命令</h3>
+            <pre><code># 重建Docker容器（后端修改后必须）
+cd /home/zzy/docker/poe && docker compose up -d --build
+
+# 查看容器日志
+docker logs poe-monitor --tail 100
+
+# 重启容器
+docker restart poe-monitor
+
+# 测试API
+curl -X POST 'https://poe.cancanneed.top/api/search' \
+  -H 'Content-Type: application/json' \
+  -d '{"league":"S29赛季","query":{"name":{"option":"物品名称"}}}'</code></pre>
+        </section>
+
+        <section id="timeline">
+            <h2>📅 开发时间线</h2>
+            
+            <div class="timeline">
+                <div class="timeline-item">
+                    <div class="timeline-date">2026-04-17</div>
+                    <p>项目启动，搭建Flask后端和Vue.js前端框架</p>
+                </div>
+                
+                <div class="timeline-item">
+                    <div class="timeline-date">2026-04-18 上午</div>
+                    <p>实现全服搜索功能，包括自动补全和词缀筛选</p>
+                </div>
+                
+                <div class="timeline-item">
+                    <div class="timeline-date">2026-04-18 下午</div>
+                    <p>实现监控系统，包括定时扫描和价格趋势图表</p>
+                </div>
+                
+                <div class="timeline-item">
+                    <div class="timeline-date">2026-04-18 晚上</div>
+                    <p>修复技能石变体搜索问题和option类型词缀显示问题</p>
+                </div>
+                
+                <div class="timeline-item">
+                    <div class="timeline-date">2026-04-19</div>
+                    <p>UI优化：卡片布局、趋势弹窗、拖拽排序、字体大小调整</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="future">
+            <h2>🚀 未来计划</h2>
+            
+            <div class="card-grid">
+                <div class="info-card">
+                    <h4>短期优化</h4>
+                    <ul style="color: var(--muted); margin-left: 20px;">
+                        <li>修复自动补全下拉框遮挡问题</li>
+                        <li>优化token持久化机制</li>
+                        <li>添加更多筛选条件</li>
+                    </ul>
+                </div>
+                
+                <div class="info-card">
+                    <h4>中期功能</h4>
+                    <ul style="color: var(--muted); margin-left: 20px;">
+                        <li>价格预警通知</li>
+                        <li>批量监控导入/导出</li>
+                        <li>历史价格数据分析</li>
+                    </ul>
+                </div>
+                
+                <div class="info-card">
+                    <h4>长期规划</h4>
+                    <ul style="color: var(--muted); margin-left: 20px;">
+                        <li>支持多个POE服务器</li>
+                        <li>移动端APP</li>
+                        <li>社区分享功能</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <footer>
+            <p>POE 监控系统 v1.0 | 由 AI + zzy 共同开发</p>
+            <p>本文档最后更新：2026-04-19</p>
+        </footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>POE 全服市集搜索</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="stylesheet" href="trade.css">
+<link rel="stylesheet" href="chunk.css">
+<link rel="stylesheet" href="global_search.css">
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+</head>
+<body>
+<div id="app">
+<div class="top-bar">
+  <div class="header-left">
+    <a href="/" class="back-link">← 返回主页</a>
+    <h1>POE 全服市集搜索</h1>
+  </div>
+  <div class="header-right">
+    <div id="userArea" class="user-area"></div>
+    <select id="league"><option>S29赛季</option><option>永久</option></select>
+  </div>
+</div>
+<div id="mainContent" style="display:none">
+<div class="sp">
+  <div class="search-row">
+    <div class="sw"><input type="text" id="si0" placeholder="查找物品..." autocomplete="off" oninput="onAC()" onkeydown="onACK(event)" onblur="clrAC()"><div class="al" id="al0"></div></div>
+    <button class="bs" onclick="doS()">搜索</button>
+    <button class="bm" onclick="addMonitor()">添加到监控</button>
+    <button class="bc" onclick="clr()">清除</button>
+  </div>
+</div>
+<div class="sa" id="sa"></div>
+<div class="fg-grid" id="fg"></div>
+<div class="ra">
+  <div class="rh" id="rh"><span class="cn" id="rc"></span><span id="rp"></span></div>
+  <div id="res"><div class="em">选择筛选条件后点击搜索</div></div>
+  <div class="pg" id="pg"></div>
+</div>
+<div class="mc-wrap" id="mc-wrap"></div>
+</div>
+</div>
+
+<!-- 滚动按钮 -->
+<button class="scroll-btn scroll-top" onclick="scrollToTop()" title="回顶部">
+  <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+</button>
+<button class="scroll-btn scroll-bottom" onclick="scrollToBottom()" title="去底部">
+  <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+</button>
+
+<script>
+var FD=null,SD=null,CP=0,SN=0,TN=0,AT=null,AI=-1,AM=[];
+var API='/api';
+var toastTimer=null;
+var isAdmin=false; // 管理员标志
+// 趋势数据缓存
+var trendCache={};  // {targetId: {data: {1d: [...], 7d: [...]}, lastUpdate: 'ISO时间'}}
+var trendTimers={}; // {targetId: intervalId} 用于后台更新
+function showToast(msg,duration){
+  hideToast();
+  var toast=document.createElement('div');
+  // 根据消息内容判断类型
+  var type='info';
+  if(msg.indexOf('✅')>=0||msg.indexOf('成功')>=0)type='success';
+  else if(msg.indexOf('⚠️')>=0||msg.indexOf('请')>=0)type='warning';
+  else if(msg.indexOf('❌')>=0||msg.indexOf('失败')>=0||msg.indexOf('错误')>=0)type='error';
+  toast.className='search-toast '+type;
+  toast.id='searchToast';
+  toast.innerHTML=msg;
+  document.body.appendChild(toast);
+  if(duration)toastTimer=setTimeout(hideToast,duration);
+}
+function hideToast(){
+  var toast=document.getElementById('searchToast');
+  if(toast)toast.remove();
+  if(toastTimer){clearTimeout(toastTimer);toastTimer=null}
+}
+async function init(){
+  // 先检查登录状态，显示UI框架
+  checkLoginStatus();
+  document.getElementById('fg').innerHTML='<div class="ld" style="text-align:center;padding:40px;color:#888">加载筛选器中...</div>';
+  document.addEventListener('click',function(e){
+    if(!e.target.closest('.sw'))document.getElementById('al0').classList.remove('show');
+    if(!e.target.closest('.sw2'))document.querySelectorAll('.sd').forEach(function(d){d.classList.remove('show')});
+    if(!e.target.closest('.sh'))document.querySelectorAll('.st').forEach(function(d){d.classList.remove('show')});
+  });
+  // 下拉框激活时禁用卡片悬浮效果，防止交互冲突
+  var si=document.getElementById('si0');
+  si.addEventListener('focus',function(){document.querySelectorAll('.fg').forEach(function(f){f.classList.add('no-hover')})});
+  si.addEventListener('blur',function(){setTimeout(function(){document.querySelectorAll('.fg').forEach(function(f){f.classList.remove('no-hover')})},200)});
+  // 词缀筛选下拉框同理（事件委托，支持动态创建的元素）
+  document.addEventListener('focusin',function(e){if(e.target.classList.contains('si')){document.querySelectorAll('.fg').forEach(function(f){f.classList.add('no-hover')})}});
+  document.addEventListener('focusout',function(e){if(e.target.classList.contains('si')){setTimeout(function(){if(!document.querySelector('.sd.show')){document.querySelectorAll('.fg').forEach(function(f){f.classList.remove('no-hover')})}},200)}});
+  window.addEventListener('scroll',updateScrollBtns);
+  
+  // 并行加载数据 + 监控目标
+  try{
+    var loadFilters=function(){return fetch('filters.json').then(function(r){return r.json()}).catch(function(){return fetch(API+'/trade/filters').then(function(r){return r.json()})})};
+    var loadItems=function(){return fetch('items.json').then(function(r){return r.json()}).catch(function(){return {result:[]}})};
+    var results=await Promise.all([
+      fetch(API+'/trade/static').then(function(r){return r.json()}),
+      fetch(API+'/trade/stats').then(function(r){return r.json()}),
+      loadFilters(),
+      loadItems()
+    ]);
+    FD={static:results[0].result||[],filters:results[2].result||[]};SD=results[1].result||[];ID=results[3].result||[];
+    SD.forEach(function(g){g.entries.forEach(function(e){
+      var entry={id:e.id,text:e.text,type:g.id};
+      if(e.option)entry.option=e.option;
+      AM.push(entry);
+    })});
+    buildUI();
+  }catch(e){document.getElementById('fg').innerHTML='<div class="em">加载筛选器失败: '+e.message+'</div>';showToast('❌ 页面初始化失败，请刷新重试',5000)}
+}
+// 滚动功能
+function scrollToTop(){window.scrollTo({top:0,behavior:'smooth'})}
+function scrollToBottom(){window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})}
+function updateScrollBtns(){
+  var btns=document.querySelectorAll('.scroll-btn');
+  var show=window.scrollY>300;
+  btns.forEach(function(b){if(show)b.classList.add('visible');else b.classList.remove('visible')});
+}
+function buildUI(){
+  var g=document.getElementById('fg'),h='';
+  var skipGroups={status_filters:1,map_filters:1,heist_filters:1,expedition_filters:1,sanctum_filters:1,ultimatum_filters:1};
+  // 按用户要求排序：插槽+类型 | 武器+护甲 | 需求+交易 | 其他(全宽)
+  var order=['socket_filters','type_filters','weapon_filters','armour_filters','req_filters','trade_filters','misc_filters'];
+  var fm={};FD.filters.forEach(function(gr){if(!skipGroups[gr.id])fm[gr.id]=gr});
+  order.forEach(function(id){
+    var gr=fm[id];if(!gr)return;
+    var fw=id==='misc_filters'?' fw':'';
+    h+='<div class="fg'+fw+'"><div class="fh" onclick="tog(this)"><span>'+gr.title+'</span><span style="color:#888;font-size:10px">▶</span></div><div class="fb hide">';
+    gr.filters.forEach(function(f){h+=rf(f,gr.id)});
+    h+='</div></div>';
+  });
+  g.innerHTML=h;
+  document.getElementById('sa').innerHTML='<div class="fg" style="flex:1 1 100%;overflow:visible !important"><div class="fh" onclick="tog(this)"><span>词缀筛选</span><span style="color:#888;font-size:10px">▶</span></div><div class="fb hide"><div id="sgl"></div><button class="ag" onclick="addSG()">+ 增加状态组</button></div></div>';
+}
+function rf(f,gid){
+  var h='<div class="fr"><label>'+(f.text||f.id)+'</label>';
+  if(f.sockets){
+    h+='<div class="sr">';
+    ['r','g','b','w'].forEach(function(c){h+='<input type="number" min="0" max="6" class="s-'+c+'" placeholder="'+c.toUpperCase()+'" data-g="'+gid+'" data-f="'+f.id+'" data-t="sk" data-c="'+c+'">'});
+    h+='<span class="sep">min</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mn">';
+    h+='<span class="sep">max</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mx">';
+    h+='</div>';
+  }else if(f.option&&(f.minMax||f.minOnly)){
+    if(f.option.options&&f.option.options.length>0){
+      h+='<select data-g="'+gid+'" data-f="'+f.id+'" data-t="op">';
+      f.option.options.forEach(function(o){h+='<option value="'+(o.id!=null?o.id:'')+'">'+o.text+'</option>'});
+      h+='</select>';
+    }else{
+      h+='<input type="text" placeholder="输入..." data-g="'+gid+'" data-f="'+f.id+'" data-t="op" style="flex:1;max-width:150px;background:#0a0a0a;border:1px solid #444;color:#ddd;padding:2px 4px;font-size:11px">';
+    }
+    h+='<span class="sep">min</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mn">';
+    if(f.minMax)h+='<span class="sep">max</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mx">';
+  }else if(f.input){
+    h+='<input type="text" placeholder="'+(f.input.placeholder||'输入...')+'" data-g="'+gid+'" data-f="'+f.id+'" data-t="op" style="flex:1;background:#0b0b14;border:1px solid #333;color:#ddd;padding:4px 6px;font-size:11px;border-radius:2px">';
+  }else if(f.option){
+    if(f.option.options&&f.option.options.length>0){
+      h+='<select data-g="'+gid+'" data-f="'+f.id+'" data-t="op">';
+      f.option.options.forEach(function(o){h+='<option value="'+(o.id!=null?o.id:'')+'">'+o.text+'</option>'});
+      h+='</select>';
+    }else{
+      h+='<input type="text" placeholder="输入..." data-g="'+gid+'" data-f="'+f.id+'" data-t="op" style="flex:1;background:#0a0a0a;border:1px solid #444;color:#ddd;padding:2px 4px;font-size:11px">';
+    }
+  }else if(f.minMax){
+    h+='<span class="sep">min</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mn">';
+    h+='<span class="sep">max</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mx">';
+  }else if(f.minOnly){
+    h+='<span class="sep">min</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mn">';
+  }
+  h+='</div>';return h;
+}
+function tog(el){var a=el.querySelector('span:last-child');a.textContent=a.textContent==='▼'?'▶':'▼';el.nextElementSibling.classList.toggle('hide')}
+// 搜索
+function onAC(){clearTimeout(AT);AT=setTimeout(doAC,80)}
+function doAC(){
+  var q=document.getElementById('si0').value.trim().toLowerCase(),al=document.getElementById('al0');
+  if(q.length<1){al.classList.remove('show');al.innerHTML='';return}
+  var m=[];ID.forEach(function(c){if(!c.entries)return;c.entries.forEach(function(e){
+    if((e.text&&e.text.toLowerCase().includes(q))||(e.type&&e.type.toLowerCase().includes(q)))m.push({text:e.text||e.type,type:e.type||'',cat:c.label||c.id})
+  })});
+  if(!m.length){al.classList.remove('show');al.innerHTML='';return}
+  al.innerHTML=m.map(function(x,i){return '<div class="ai'+(i===0?' hl':'')+'" onclick="selAC(this)" data-t="'+esc(x.text)+'">'+esc(x.text)+'<span class="ac">'+esc(x.cat)+'</span></div>'}).join('');
+  al.classList.add('show');AI=0;
+}
+function onACK(e){var items=document.getElementById('al0').querySelectorAll('.ai');if(!items.length)return;
+  if(e.key==='ArrowDown'){e.preventDefault();AI=Math.min(AI+1,items.length-1);items.forEach(function(it,i){it.classList.toggle('hl',i===AI)})}
+  else if(e.key==='ArrowUp'){e.preventDefault();AI=Math.max(AI-1,0);items.forEach(function(it,i){it.classList.toggle('hl',i===AI)})}
+  else if(e.key==='Enter'){e.preventDefault();if(AI>=0&&items[AI])selAC(items[AI]);else doS()}
+  else if(e.key==='Escape')document.getElementById('al0').classList.remove('show')}
+function selAC(el){var inp=document.getElementById('si0');inp.value=el.dataset.t;inp.dataset.selected='1';document.getElementById('al0').classList.remove('show')}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')}
+// 词缀
+function addSG(){
+  var c=document.getElementById('sgl'),n=SN++,d=document.createElement('div');d.className='sg';d.id='sgw-'+n;
+  var tp='sgt-'+n;
+  d.innerHTML='<div class="sh"><span class="sl" id="sgl2-'+n+'" onclick="document.getElementById(\''+tp+'\').classList.toggle(\'show\')">与</span><span style="font-size:10px;color:#666">组 #'+(n+1)+'</span><input type="number" class="scv" id="scv-'+n+'" placeholder="N" min="1" value="1" style="display:none;width:50px;margin-left:8px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:2px 6px;font-size:12px;border-radius:10px;text-align:center"><span class="swv" id="swv-'+n+'" style="display:none;margin-left:8px"><span class="sep" style="color:#666">min</span><input type="number" id="swm-'+n+'" placeholder="min" style="width:55px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:2px 4px;font-size:11px;border-radius:10px;text-align:center"><span class="sep" style="color:#666">max</span><input type="number" id="swx-'+n+'" placeholder="max" style="width:55px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:2px 4px;font-size:11px;border-radius:10px;text-align:center"></span><button class="sx" onclick="document.getElementById(\'sgw-'+n+'\').remove()">✕</button><div class="st" id="'+tp+'"><button class="sb on" data-t="and" onclick="setSG('+n+',\'and\')">与</button><button class="sb" data-t="not" onclick="setSG('+n+',\'not\')">非</button><button class="sb" data-t="if" onclick="setSG('+n+',\'if\')">如果</button><button class="sb" data-t="count" onclick="setSG('+n+',\'count\')">数量</button><button class="sb" data-t="weight" onclick="setSG('+n+',\'weight\')">加权求和</button><button class="sb" data-t="weight2" onclick="setSG('+n+',\'weight2\')">加权求和V2</button></div></div><div id="sgc-'+n+'"></div><button class="as" onclick="addST('+n+')">+ 添加词缀</button>';
+  c.appendChild(d);
+  // 自动添加一个词缀输入框并聚焦
+  addST(n);
+  setTimeout(function(){var inp=document.getElementById('sti-'+(TN-1));if(inp)inp.focus()},50);
+}
+function setSG(n,type){
+  document.querySelectorAll('#sgt-'+n+' .sb').forEach(function(b){b.classList.toggle('on',b.dataset.t===type)});
+  document.getElementById('sgl2-'+n).textContent={and:'与',not:'非',if:'如果',count:'数量',weight:'加权求和',weight2:'加权求和V2'}[type]||type;
+  // count: 显示N值输入框，隐藏weight min/max
+  document.getElementById('scv-'+n).style.display=type==='count'?'inline-block':'none';
+  // weight/weight2: 显示min/max输入框，隐藏count N值
+  var wv=document.getElementById('swv-'+n);
+  if(wv)wv.style.display=(type==='weight'||type==='weight2')?'inline':'none';
+  // weight/weight2: 显示/隐藏该组下所有词缀的权重输入框
+  var show=type==='weight'||type==='weight2';
+  var sg=document.getElementById('sgw-'+n);
+  if(sg)sg.querySelectorAll('.wt-input').forEach(function(el){el.style.display=show?'inline-block':'none'});
+  document.getElementById('sgt-'+n).classList.remove('show');
+}
+function getSG(n){var on=document.querySelector('#sgt-'+n+' .sb.on');return on?on.dataset.t:'and'}
+function addST(gn){
+  var c=document.getElementById('sgc-'+gn),n=TN++,d=document.createElement('div');d.className='sr2';d.id='str-'+n;d.dataset.gn=gn;
+  d.innerHTML='<div class="sw2"><input class="si" id="sti-'+n+'" placeholder="输入词缀名搜索..." autocomplete="off" oninput="onSI('+n+')" onkeydown="onSK(event,'+n+')" onfocus="onSI('+n+')" onblur="clrST('+n+')"><div class="sd" id="sdd-'+n+'"></div></div><input class="sv wt-input" type="number" placeholder="权重" id="stw-'+n+'" style="display:none"><input class="sv" type="number" placeholder="min" id="stn-'+n+'"><span class="sep">—</span><input class="sv" type="number" placeholder="max" id="stx-'+n+'"><button class="sr3" onclick="document.getElementById(\'str-'+n+'\').remove()">✕</button><input type="hidden" id="stv-'+n+'" value="">';
+  c.appendChild(d);
+  // 如果当前组已是weight模式，显示权重框
+  var mode=getSG(gn);if(mode==='weight'||mode==='weight2')d.querySelector('.wt-input').style.display='inline-block';
+  // 自动聚焦到新创建的输入框
+  setTimeout(function(){var inp=document.getElementById('sti-'+n);if(inp)inp.focus()},50);
+}
+var STs={},SIs={};
+function clrAC(){var inp=document.getElementById('si0');if(!inp.dataset.selected){inp.value=''}delete inp.dataset.selected;}
+function clrST(n){
+  var hid=document.getElementById('stv-'+n);
+  if(!hid.value){document.getElementById('sti-'+n).value=''}
+}
+function onSI(n){clearTimeout(STs[n]);STs[n]=setTimeout(function(){doSS(n)},60)}
+function doSS(n){
+  var inp=document.getElementById('sti-'+n),drop=document.getElementById('sdd-'+n),q=inp.value.trim().toLowerCase();
+  if(q.length<1){drop.classList.remove('show');drop.innerHTML='';return}
+  var m=AM.filter(function(x){return x.text.toLowerCase().includes(q)});
+  if(!m.length){drop.classList.remove('show');return}
+  drop.innerHTML=m.map(function(x,i){return '<div class="so'+(i===0?' hl':'')+'" data-id="'+x.id+'" data-tp="'+x.type+'" data-tx="'+esc(x.text)+'" onclick="selST('+n+',this)"><span class="st2 tp-'+x.type+'">'+x.type+'</span> '+esc(x.text)+'</div>'}).join('');
+  drop.classList.add('show');SIs[n]=0;
+}
+function onSK(e,n){
+  var drop=document.getElementById('sdd-'+n),items=drop.querySelectorAll('.so');if(!items.length)return;
+  if(e.key==='ArrowDown'){e.preventDefault();SIs[n]=Math.min((SIs[n]||0)+1,items.length-1);items.forEach(function(it,i){it.classList.toggle('hl',i===SIs[n])})}
+  else if(e.key==='ArrowUp'){e.preventDefault();SIs[n]=Math.max((SIs[n]||0)-1,0);items.forEach(function(it,i){it.classList.toggle('hl',i===SIs[n])})}
+  else if(e.key==='Enter'){e.preventDefault();if(SIs[n]>=0&&items[SIs[n]])selST(n,items[SIs[n]])}
+  else if(e.key==='Escape')drop.classList.remove('show');
+}
+function selST(n,el){
+  var inp=document.getElementById('sti-'+n);
+  var hid=document.getElementById('stv-'+n);
+  inp.value=el.dataset.tx;
+  hid.value=el.dataset.id;
+  inp.dataset.tp=el.dataset.tp;
+  document.getElementById('sdd-'+n).classList.remove('show');
+  
+  // 查找词缀详情
+  var modId=el.dataset.id;
+  var modEntry=null;
+  AM.forEach(function(a){if(a.id===modId)modEntry=a;});
+  
+  var minInput=document.getElementById('stn-'+n);
+  var maxInput=document.getElementById('stx-'+n);
+  var sepSpan=minInput.nextElementSibling; // "—"分隔符
+  
+  if(modEntry && modEntry.option && modEntry.option.options){
+    // 有option → 隐藏min/max，显示select
+    minInput.style.display='none';
+    maxInput.style.display='none';
+    sepSpan.style.display='none';
+    
+    // 创建或更新select
+    var sel=document.getElementById('sts-'+n);
+    if(!sel){
+      sel=document.createElement('select');
+      sel.id='sts-'+n;
+      sel.className='sv';
+      sel.style.cssText='background:#0a0a0a;border:1px solid #444;color:#ddd;padding:2px 4px;font-size:11px;width:100px';
+      minInput.parentNode.insertBefore(sel,minInput);
+    }
+    sel.innerHTML='<option value="">选择...</option>';
+    modEntry.option.options.forEach(function(o){
+      sel.innerHTML+='<option value="'+o.id+'">'+o.text+'</option>';
+    });
+    sel.style.display='';
+  }else{
+    // 无option → 显示min/max，隐藏select
+    minInput.style.display='';
+    maxInput.style.display='';
+    sepSpan.style.display='';
+    
+    var sel=document.getElementById('sts-'+n);
+    if(sel) sel.style.display='none';
+  }
+}
+// 查询
+function bQ(){
+  var q={},f={};
+  var name=document.getElementById('si0').value.trim();if(name)q.name={option:name};
+  document.querySelectorAll('[data-g]').forEach(function(el){
+    var g=el.dataset.g,fi=el.dataset.f,t=el.dataset.t;
+    if(!f[g])f[g]={};if(!f[g][fi])f[g][fi]={};
+    if(t==='op'){if(el.value!=='')f[g][fi]={option:el.value}}
+    else if(t==='mn'){if(el.value!==''){if(!f[g][fi].value)f[g][fi].value={};f[g][fi].value.min=parseFloat(el.value)}}
+    else if(t==='mx'){if(el.value!==''){if(!f[g][fi].value)f[g][fi].value={};f[g][fi].value.max=parseFloat(el.value)}}
+    else if(t==='sk'){var c=el.dataset.c;if(el.value!==''){if(!f[g][fi].value)f[g][fi].value={};f[g][fi].value[c]=parseInt(el.value)}}
+  });
+  var filters={};Object.keys(f).forEach(function(g){var ff={};Object.keys(f[g]).forEach(function(fi){var v=f[g][fi];if(v.option!==undefined&&v.option!=='')ff[fi]=v;else if(v.value&&Object.keys(v.value).length)ff[fi]=v.value});if(Object.keys(ff).length)filters[g]={filters:ff}});
+  if(Object.keys(filters).length)q.filters=filters;
+  var stats=[];document.querySelectorAll('.sg').forEach(function(sg){
+    var n=sg.id.replace('sgw-',''),type=getSG(n),sfs=[];
+    sg.querySelectorAll('.sr2').forEach(function(sr){
+      var sn=sr.id.replace('str-',''),modId=document.getElementById('stv-'+sn).value,modTp=document.getElementById('sti-'+sn).dataset.tp||'explicit';
+      var smin=document.getElementById('stn-'+sn),smax=document.getElementById('stx-'+sn);
+      var sel=document.getElementById('sts-'+sn);
+      if(modId){
+        var sf={type:modTp,id:modId,disabled:false};
+        
+        if(sel && sel.style.display!=='none' && sel.value){
+          // option类型
+          sf.value={option:parseInt(sel.value)};
+        }else{
+          // min/max类型
+          var sv={},ok=false;
+          if(smin&&smin.value!==''){sv.min=parseFloat(smin.value);ok=true}
+          if(smax&&smax.value!==''){sv.max=parseFloat(smax.value);ok=true}
+          sf.value=ok?sv:{};
+        }
+        
+        var wt=document.getElementById('stw-'+sn);
+        if(wt&&wt.value!=='')sf.weight=parseFloat(wt.value);
+        sfs.push(sf);
+      }
+    });if(sfs.length){var sg={type:type,filters:sfs};
+      if(type==='count'){var cv=document.getElementById('scv-'+n);if(cv&&cv.value)sg.value={min:parseInt(cv.value)}}
+      else if(type==='weight'||type==='weight2'){var sv={};var wmn=document.getElementById('swm-'+n),wmx=document.getElementById('swx-'+n);if(wmn&&wmn.value!=='')sv.min=parseFloat(wmn.value);if(wmx&&wmx.value!=='')sv.max=parseFloat(wmx.value);if(Object.keys(sv).length)sg.value=sv}
+    stats.push(sg)}
+  });if(stats.length)q.stats=stats;return q;
+}
+async function doS(page){
+  CP=page||0;var q=bQ(),league=document.getElementById('league').value;
+  // 显示搜索中提示
+  showToast('🔍 正在搜索...');
+  document.getElementById('res').innerHTML='<div class="ld">搜索中...</div>';
+  var h={'Content-Type':'application/json'},token=localStorage.getItem('token');if(token)h['Authorization']='Bearer '+token;
+  try{var r=await fetch(API+'/search',{method:'POST',headers:h,body:JSON.stringify({league:league,query:q,page:CP})});
+    var d=await r.json();if(!r.ok){var errMsg=d.msg||'未知错误';if(errMsg.indexOf('POESESSID')>=0){showToast('❌ 请先设置 POESESSID 凭证<br><a href="/" style="color:#fff;text-decoration:underline">前往主页设置</a>',5000)}else{showToast('❌ 搜索失败: '+errMsg,3000)}document.getElementById('res').innerHTML='<div class="em">'+errMsg+'</div>';return}
+    renR(d.items||[],d.total||0);renP(d.total||0);
+    // 显示结果提示
+    showToast('✅ 找到 '+(d.total||0)+' 个结果',2000);
+  }catch(e){document.getElementById('res').innerHTML='<div class="em">请求失败: '+e.message+'</div>';hideToast()}
+}
+function renR(items,total){
+  document.getElementById('rh').style.display='flex';document.getElementById('rc').textContent='共 '+total+' 个结果';document.getElementById('rp').textContent='第 '+(CP+1)+' 页';
+  var res=document.getElementById('res');
+  if(!items.length){
+    res.innerHTML='<div class="zero-result"><div class="icon">🔍</div><div class="title">未找到匹配的物品</div><div class="desc">请检查筛选条件是否正确：<br>• 物品名称/类型是否准确<br>• 价格范围是否合理<br>• 词缀条件是否过于苛刻<br><br>尝试减少筛选条件后重新搜索</div></div>';
+    hideToast();
+    return;
+  }
+  var cn={chaos:'混沌石',divine:'神圣石',exalted:'崇高石',mirror:'镜子'};
+  res.innerHTML=items.map(function(it){
+    var item=it.item||{},list=it.listing||{},price=list.price||{};
+    var r=item.frameType===3?'unique':item.frameType===2?'rare':item.frameType===1?'magic':'normal';
+    // 合并所有类型的词缀
+    var allMods=[];
+    ['explicitMods','implicitMods','fracturedMods','craftedMods','enchantMods','mutatedMods','veiledMods'].forEach(function(key){
+      if(item[key]&&Array.isArray(item[key]))allMods=allMods.concat(item[key]);
+    });
+    var mods=allMods.map(function(m){return '<div>'+((typeof m==='string')?m:(m.text||''))+'</div>'}).join('');
+    var stats='';if(item.extended){var p=[];if(item.extended.dps)p.push('DPS '+item.extended.dps);if(item.extended.pdps)p.push('物理 '+item.extended.pdps);if(item.extended.ar)p.push('护甲 '+item.extended.ar);if(item.extended.es)p.push('ES '+item.extended.es);if(p.length)stats='<div class="is">'+p.join(' · ')+'</div>'}
+    var ph=price.amount?'<div class="ip"><div class="a">'+price.amount+'</div><div class="c">'+(cn[price.currency]||price.currency)+'</div></div>':'<div class="ip"><div class="c">无价格</div></div>';
+    return '<div class="ic"><img src="'+(item.icon||'')+'" onerror="this.style.display=\'none\'"><div class="ii"><div class="in '+r+'">'+esc(item.name||'')+'</div><div class="it">'+esc(item.typeLine||'')+'</div><div class="im">'+mods+'</div>'+stats+'</div>'+ph+'</div>'
+  }).join('');
+}
+function renP(total){
+  var el=document.getElementById('pg'),tp=Math.ceil(total/20);if(tp<=1){el.innerHTML='';return}
+  var h='';if(CP>0)h+='<button onclick="doS('+(CP-1)+')">上一页</button>';
+  for(var i=Math.max(0,CP-2);i<Math.min(tp,CP+3);i++)h+='<button class="'+(i===CP?'on':'')+'" onclick="doS('+i+')">'+(i+1)+'</button>';
+  if(CP<tp-1)h+='<button onclick="doS('+(CP+1)+')">下一页</button>';el.innerHTML=h;
+}
+function clr(){
+  document.getElementById('si0').value='';document.querySelectorAll('input[type=number]').forEach(function(e){e.value=''});document.querySelectorAll('select[data-t=op]').forEach(function(e){e.selectedIndex=0});document.getElementById('sgl').innerHTML='';document.getElementById('rh').style.display='none';document.getElementById('res').innerHTML='<div class="em">选择筛选条件后点击搜索</div>';document.getElementById('pg').innerHTML='';
+}
+
+/* ========== 全服监控列表 ========== */
+function fmtQ(qp){
+  if(!qp)return '';
+  var parts=[];
+  if(qp.name)parts.push('物品: '+qp.name);
+  if(qp.type)parts.push('类型: '+qp.type);
+  if(qp.stats)qp.stats.forEach(function(s){s.filters.forEach(function(f){parts.push(f.id.split('.').pop())})});
+  return parts.join(' | ') || '自定义筛选';
+}
+/* ========== 添加到监控 ========== */
+/* ========== 添加到监控 ========== */
+function authH(){var t=localStorage.getItem('token');return t?{'Authorization':'Bearer '+t}:{}}
+function fmtT(iso){
+  if(!iso)return '';
+  try{
+    var d=new Date(iso);
+    var year=d.getFullYear();
+    var month=String(d.getMonth()+1).padStart(2,'0');
+    var day=String(d.getDate()).padStart(2,'0');
+    var hours=String(d.getHours()).padStart(2,'0');
+    var minutes=String(d.getMinutes()).padStart(2,'0');
+    var seconds=String(d.getSeconds()).padStart(2,'0');
+    return year+'-'+month+'-'+day+' '+hours+':'+minutes+':'+seconds;
+  }catch(e){return iso}
+}
+
+function addMonitor(){
+  // 获取当前筛选条件
+  var q=bQ();
+  // 检查是否有筛选条件
+  var hasFilter=Object.keys(q).length>0;
+  if(!hasFilter){showToast('⚠️ 请先设置筛选条件',3000);return}
+  // 检查登录
+  var token=localStorage.getItem('token');
+  if(!token){showLoginModal();return}
+
+  // 弹窗输入监控间隔
+  var minInterval=isAdmin?60:300;
+  var defaultVal=isAdmin?'60':'300';
+  showModal('添加到监控','监控间隔（秒）：',defaultVal,function(interval){
+    interval=parseInt(interval)||minInterval;
+    if(interval<minInterval){showToast('⚠️ 间隔不能小于'+minInterval+'秒',3000);return}
+    doAddMonitor(q,interval);
+  },minInterval);
+}
+
+async function doAddMonitor(query,interval){
+  var league=document.getElementById('league').value;
+  var h=Object.assign({'Content-Type':'application/json'},authH());
+  try{
+    var r=await fetch(API+'/search/monitor',{method:'POST',headers:h,body:JSON.stringify({league:league,query:query,scan_interval:interval})});
+    var d=await r.json();
+    if(!r.ok){showToast('❌ '+(d.msg||'创建监控失败'),3000);return}
+    // 成功，渲染卡片
+    showToast('✅ 已添加到监控',2000);
+    renderCard(d,query,interval);
+  }catch(e){showToast('❌ 请求失败: '+e.message,3000)}
+}
+
+function renderCard(data,query,interval){
+  var wrap=document.getElementById('mc-wrap');
+  if(document.getElementById('mc-'+data.id))return;
+  var div=document.createElement('div');
+  div.className='mc';
+  div.id='mc-'+data.id;
+  div.setAttribute('data-id',data.id);
+  var title=query.name&&query.name.option?query.name.option:(query.type||'全服监控');
+  var qid=data.query_id||'';
+  var league=document.getElementById('league').value;
+  var officialUrl='https://poe.game.qq.com/trade/search/'+encodeURIComponent(league)+'/'+qid;
+  div.innerHTML=
+    '<div class="mc-head">'+
+      '<span class="drag-handle" data-tip="拖拽排序">⋮⋮</span>'+
+      '<span class="mc-title">'+esc(title)+'</span>'+
+      '<div class="mc-meta">'+
+        '<span class="mc-interval" onclick="editInterval('+data.id+','+interval+')" data-tip="修改扫描间隔">'+interval+'s</span>'+
+        '<span class="mc-last-scan">刚刚</span>'+
+      '</div>'+
+      '<div class="mc-btns">'+
+        '<button class="mc-toggle on" id="mct-'+data.id+'" onclick="toggleTarget('+data.id+')" data-tip="启用/禁用监控"></button>'+
+        '<button class="mc-btn" onclick="triggerScan('+data.id+',this)" id="mcb-trigger-'+data.id+'" data-tip="立即刷新数据">🔄</button>'+
+        '<button class="mc-btn" onclick="viewTrend('+data.id+')" data-tip="查看价格趋势">📈</button>'+
+        (qid?'<a class="mc-btn" href="'+esc(officialUrl)+'" target="_blank" data-tip="前往官网查看">🔗</a>':'')+
+        '<button class="mc-btn danger" onclick="deleteTarget('+data.id+')" data-tip="删除此监控">🗑</button>'+
+      '</div>'+
+    '</div>'+
+    '<div class="mc-stats" id="mcs-'+data.id+'">'+
+      '<div class="mc-stat"><div class="val">'+data.total+'</div><div class="lbl">在售总数</div></div>'+
+      '<div class="mc-stat"><div class="val">'+(data.top10_avg||0)+'</div><div class="lbl">前10均价(D)</div></div>'+
+      '<div class="mc-stat"><div class="val"><span id="mc-listed-'+data.id+'">-</span>/<span id="mc-sold-'+data.id+'">-</span><div class="mc-period"><button class="on" onclick="switchPeriod('+data.id+',1,this)">今天</button><button onclick="switchPeriod('+data.id+',3,this)">3日</button><button onclick="switchPeriod('+data.id+',5,this)">5日</button><button onclick="switchPeriod('+data.id+',7,this)">7日</button></div></div><div class="lbl">上架/售出</div></div>'+
+    '</div>'+
+    '<div class="mc-items" id="mci-'+data.id+'"><div class="mc-empty">加载中...</div></div>'+
+    '<div class="mc-foot">'+
+      '<span class="mc-qid">Query: '+qid.substring(0,12)+'…</span>'+
+    '</div>';
+  wrap.insertBefore(div,wrap.firstChild);
+  initMcSortable();
+  loadCardData(data.id);
+}
+
+function renderCardFromTarget(t){
+  if(document.getElementById('mc-'+t.id))return;
+  var wrap=document.getElementById('mc-wrap');
+  var div=document.createElement('div');
+  div.className='mc';
+  div.id='mc-'+t.id;
+  div.setAttribute('data-id',t.id);
+  var qp=t.query_params||{};
+  var title=fmtQ(qp);
+  var qid=t.query_id||'';
+  var officialUrl='https://poe.game.qq.com/trade/search/'+encodeURIComponent(t.league)+'/'+qid;
+  var enabled=t.enabled!==false;
+  div.innerHTML=
+    '<div class="mc-head">'+
+      '<span class="drag-handle" data-tip="拖拽排序">⋮⋮</span>'+
+      '<span class="mc-title">'+esc(title)+'</span>'+
+      '<div class="mc-meta">'+
+        '<span class="mc-interval" onclick="editInterval('+t.id+','+t.scan_interval+')" data-tip="修改扫描间隔">'+t.scan_interval+'s</span>'+
+        '<span class="mc-last-scan">'+(t.last_scan?fmtT(t.last_scan):'未扫描')+'</span>'+
+      '</div>'+
+      '<div class="mc-btns">'+
+        '<button class="mc-toggle '+(enabled?'on':'off')+'" id="mct-'+t.id+'" onclick="toggleTarget('+t.id+')" data-tip="启用/禁用监控"></button>'+
+        '<button class="mc-btn" onclick="triggerScan('+t.id+',this)" id="mcb-trigger-'+t.id+'" data-tip="立即刷新数据">🔄</button>'+
+        '<button class="mc-btn" onclick="viewTrend('+t.id+')" data-tip="查看价格趋势">📈</button>'+
+        (qid?'<a class="mc-btn" href="'+esc(officialUrl)+'" target="_blank" data-tip="前往官网查看">🔗</a>':'')+
+        '<button class="mc-btn danger" onclick="deleteTarget('+t.id+')" data-tip="删除此监控">🗑</button>'+
+      '</div>'+
+    '</div>'+
+    '<div class="mc-stats" id="mcs-'+t.id+'">'+
+      '<div class="mc-stat"><div class="val">'+(t.item_count||0)+'</div><div class="lbl">在售总数</div></div>'+
+      '<div class="mc-stat"><div class="val" id="mc-avg-'+t.id+'">-</div><div class="lbl">前10均价(D)</div></div>'+
+      '<div class="mc-stat"><div class="val"><span id="mc-listed-'+t.id+'">'+(t.today_new||0)+'</span>/<span id="mc-sold-'+t.id+'">'+(t.today_sold_count||0)+'</span><div class="mc-period"><button class="on" onclick="switchPeriod('+t.id+',1,this)">今天</button><button onclick="switchPeriod('+t.id+',3,this)">3日</button><button onclick="switchPeriod('+t.id+',5,this)">5日</button><button onclick="switchPeriod('+t.id+',7,this)">7日</button></div></div><div class="lbl">上架/售出</div></div>'+
+    '</div>'+
+    '<div class="mc-items" id="mci-'+t.id+'"><div class="mc-empty">加载中...</div></div>'+
+    '<div class="mc-foot">'+
+      '<span class="mc-qid">Query: '+qid.substring(0,12)+'…</span>'+
+    '</div>';
+  wrap.appendChild(div);
+  loadCardData(t.id);
+}
+
+// 加载卡片详情：趋势+物品+上架售出
+var trendCache={};
+async function loadCardData(targetId){
+  var h=Object.assign({'Content-Type':'application/json'},authH());
+  try{
+    var[snapRes,statRes]=await Promise.all([
+      fetch(API+'/targets/'+targetId+'/snapshots?limit=20',{headers:h}),
+      fetch(API+'/targets/'+targetId+'/sale_stats?days=1',{headers:h})
+    ]);
+    // 物品列表
+    var items=await snapRes.json();
+    var el=document.getElementById('mci-'+targetId);
+    if(el)el.innerHTML=renderSnapshots(items);
+    // 计算前10均价
+    var top10Avg=0;
+    if(items.length>0){
+      var divinePrices=items.filter(function(it){return it.price_currency==='divine'}).map(function(it){return it.price});
+      if(divinePrices.length>0){
+        top10Avg=Math.round(divinePrices.slice(0,10).reduce(function(a,b){return a+b},0)/Math.min(divinePrices.length,10));
+      }
+    }
+    // 更新前10均价显示 — 查找卡片内所有.val元素，找到"前10均价"旁边的值
+    var card=document.getElementById('mc-'+targetId);
+    if(card){
+      var stats=card.querySelectorAll('.mc-stat');
+      if(stats.length>=2){
+        var avgVal=stats[1].querySelector('.val');
+        if(avgVal)avgVal.textContent=top10Avg||0;
+      }
+    }
+    // 上架/售出
+    var sd=await statRes.json();
+    var listedEl=document.getElementById('mc-listed-'+targetId);
+    var soldEl=document.getElementById('mc-sold-'+targetId);
+    if(listedEl)listedEl.textContent=sd.listed||0;
+    if(soldEl)soldEl.textContent=sd.sold||0;
+    // 更新扫描时间为具体时间
+    var scanEl=card?card.querySelector('.mc-last-scan'):null;
+    if(scanEl){
+      var now=new Date();
+      scanEl.textContent=now.getFullYear()+'-'+
+        String(now.getMonth()+1).padStart(2,'0')+'-'+
+        String(now.getDate()).padStart(2,'0')+' '+
+        String(now.getHours()).padStart(2,'0')+':'+
+        String(now.getMinutes()).padStart(2,'0')+':'+
+        String(now.getSeconds()).padStart(2,'0');
+    }
+    // 缓存趋势数据（点击时用）
+    // 预加载24小时和7天数据
+    loadTrendData(targetId);
+  }catch(e){console.error('加载卡片数据失败:',e)}
+}
+
+// 加载趋势数据（首次加载和定期更新）
+async function loadTrendData(targetId){
+  var h=Object.assign({'Content-Type':'application/json'},authH());
+  try{
+    // 并行加载24小时和7天数据
+    var [res1d,res7d]=await Promise.all([
+      fetch(API+'/targets/'+targetId+'/price_trend?days=1',{headers:h}),
+      fetch(API+'/targets/'+targetId+'/price_trend?days=7',{headers:h})
+    ]);
+    
+    var data1d=await res1d.json();
+    var data7d=await res7d.json();
+    
+    // 缓存数据
+    trendCache[targetId]={
+      data:{
+        '1d':data1d.top10_avg_prices||[],
+        '7d':data7d.top10_avg_prices||[]
+      },
+      lastUpdate:new Date().toISOString()
+    };
+    
+    // 启动后台定时更新
+    startTrendAutoUpdate(targetId);
+    
+  }catch(e){
+    console.error('加载趋势数据失败:',e);
+  }
+}
+
+// 后台定时更新趋势数据
+function startTrendAutoUpdate(targetId){
+  // 清除已有定时器
+  if(trendTimers[targetId]){
+    clearInterval(trendTimers[targetId]);
+  }
+  
+  // 获取扫描间隔（默认300秒）
+  var interval=getTargetScanInterval(targetId)*1000;
+  
+  // 设置定时器
+  trendTimers[targetId]=setInterval(function(){
+    updateTrendIncremental(targetId);
+  },interval);
+}
+
+// 增量更新趋势数据
+async function updateTrendIncremental(targetId){
+  var cached=trendCache[targetId];
+  if(!cached||!cached.lastUpdate){
+    // 没有缓存，完整加载
+    loadTrendData(targetId);
+    return;
+  }
+  
+  var h=Object.assign({'Content-Type':'application/json'},authH());
+  try{
+    // 尝试增量更新（只拉取最近的数据）
+    var since=cached.lastUpdate;
+    var [res1d,res7d]=await Promise.all([
+      fetch(API+'/targets/'+targetId+'/price_trend?days=1&since='+since,{headers:h}),
+      fetch(API+'/targets/'+targetId+'/price_trend?days=7&since='+since,{headers:h})
+    ]);
+    
+    // 检查响应是否成功
+    if(!res1d.ok||!res7d.ok){
+      throw new Error('增量更新失败');
+    }
+    
+    var newData1d=await res1d.json();
+    var newData7d=await res7d.json();
+    
+    // 合并新数据（如果有的话）
+    if(newData1d.top10_avg_prices&&newData1d.top10_avg_prices.length>0){
+      cached.data['1d']=cached.data['1d'].concat(newData1d.top10_avg_prices);
+    }
+    if(newData7d.top10_avg_prices&&newData7d.top10_avg_prices.length>0){
+      cached.data['7d']=cached.data['7d'].concat(newData7d.top10_avg_prices);
+    }
+    
+    cached.lastUpdate=new Date().toISOString();
+    
+  }catch(e){
+    console.warn('增量更新失败，尝试完整加载:',e);
+    // 增量更新失败，完整加载
+    loadTrendData(targetId);
+  }
+}
+
+// 获取目标的扫描间隔
+function getTargetScanInterval(targetId){
+  // 默认300秒
+  var defaultInterval=300;
+  
+  // 尝试从DOM获取
+  var card=document.getElementById('mc-'+targetId);
+  if(card){
+    var intervalEl=card.querySelector('.mc-interval');
+    if(intervalEl){
+      var text=intervalEl.textContent;
+      var match=text.match(/(\d+)s/);
+      if(match){
+        return parseInt(match[1]);
+      }
+    }
+  }
+  
+  return defaultInterval;
+}
+
+function renderSnapshots(items){
+  if(!items.length)return '<div class="mc-empty">暂无在售物品</div>';
+  var cn={chaos:'C',divine:'D',mirror:'M'};
+  return items.map(function(it){
+    var name=(it.item_name?it.item_name+' ':'')+it.base_type;
+    var price=it.price+' '+(cn[it.price_currency]||it.price_currency);
+    var mods='';
+    if(it.explicit_mods){
+      try{var arr=typeof it.explicit_mods==='string'?JSON.parse(it.explicit_mods):it.explicit_mods;
+        mods=arr.map(function(m){return '<div class="mc-item-mod">'+esc(m)+'</div>'}).join('');
+      }catch(e){mods='<div class="mc-item-mod">'+esc(it.explicit_mods)+'</div>'}
+    }
+    var listedTime='';
+    if(it.item_data&&it.item_data.listing&&it.item_data.listing.indexed){
+      var indexed=new Date(it.item_data.listing.indexed);
+      var now=new Date();
+      var diff=Math.floor((now-indexed)/1000);
+      var relTime='';
+      if(diff<60)relTime=diff+'秒前';
+      else if(diff<3600)relTime=Math.floor(diff/60)+'分钟前';
+      else if(diff<86400)relTime=Math.floor(diff/3600)+'小时前';
+      else relTime=Math.floor(diff/86400)+'天前';
+      listedTime='<span>上架: '+relTime+'</span>';
+    }
+    return '<div class="mc-item">'+
+      '<div class="mc-item-head"><span class="mc-item-name">'+esc(name)+'</span><span class="mc-item-price">'+price+'</span></div>'+
+      '<div class="mc-item-info">'+(it.ilvl?'<span>物品等级: '+it.ilvl+'</span>':'')+(it.seller_account?'<span>卖家: '+esc(it.seller_account)+'</span>':'')+listedTime+'</div>'+
+      (mods?'<div class="mc-item-mods">'+mods+'</div>':'')+
+    '</div>';
+  }).join('');
+}
+
+// === 卡片操作 ===
+async function toggleTarget(id){
+  var btn=document.getElementById('mct-'+id);
+  var wasOn=btn.classList.contains('on');
+  var h=Object.assign({'Content-Type':'application/json'},authH());
+  try{
+    var r=await fetch(API+'/targets/'+id,{method:'PUT',headers:h,body:JSON.stringify({enabled:!wasOn})});
+    if(r.ok){btn.classList.toggle('on');btn.classList.toggle('off');showToast(wasOn?'⏸ 已禁用':'▶ 已启用',1500)}
+    else showToast('❌ 操作失败',2000);
+  }catch(e){showToast('❌ '+e.message,2000)}
+}
+
+async function triggerScan(id,btnEl){
+  var btn=btnEl||document.getElementById('mcb-trigger-'+id);
+  btn.classList.add('disabled');
+  btn.textContent='⏳';
+  var h=authH();
+  try{
+    var r=await fetch(API+'/targets/'+id+'/trigger',{method:'POST',headers:h});
+    var d=await r.json();
+    if(r.ok){showToast('🔄 '+d.msg,2000);setTimeout(function(){loadCardData(id)},3000)}
+    else if(r.status===429){showToast('⏳ '+d.msg,3000)}
+    else showToast('❌ '+d.msg,2000);
+  }catch(e){showToast('❌ '+e.message,2000)}
+  setTimeout(function(){btn.classList.remove('disabled');btn.textContent='🔄'},5000);
+}
+
+async function deleteTarget(id){
+  if(!confirm('确定删除此监控目标？'))return;
+  var h=authH();
+  try{
+    var r=await fetch(API+'/targets/'+id,{method:'DELETE',headers:h});
+    if(r.ok){document.getElementById('mc-'+id).remove();showToast('🗑 已删除',1500)}
+    else showToast('❌ 删除失败',2000);
+  }catch(e){showToast('❌ '+e.message,2000)}
+}
+
+function editInterval(id,current){
+  var minInterval=isAdmin?60:300;
+  showModal('修改扫描间隔','扫描间隔（秒）：',current,function(val){
+    val=parseInt(val)||current;
+    if(val<minInterval){showToast('⚠️ 间隔不能小于'+minInterval+'秒',3000);return}
+    var h=Object.assign({'Content-Type':'application/json'},authH());
+    fetch(API+'/targets/'+id,{method:'PUT',headers:h,body:JSON.stringify({scan_interval:val})}).then(function(r){
+      if(r.ok){showToast('✅ 已更新',1500);
+        var el=document.querySelector('#mc-'+id+' .mc-interval');
+        if(el)el.textContent=val+'s';
+      }else showToast('❌ 更新失败',2000);
+    }).catch(function(e){showToast('❌ '+e.message,2000)});
+  },minInterval);
+}
+
+async function switchPeriod(id,days,btn){
+  // 更新按钮样式
+  btn.parentElement.querySelectorAll('button').forEach(function(b){b.classList.remove('on')});
+  btn.classList.add('on');
+  var h=authH();
+  try{
+    var r=await fetch(API+'/targets/'+id+'/sale_stats?days='+days,{headers:h});
+    var d=await r.json();
+    var listedEl=document.getElementById('mc-listed-'+id);
+    var soldEl=document.getElementById('mc-sold-'+id);
+    if(listedEl)listedEl.textContent=d.listed||0;
+    if(soldEl)soldEl.textContent=d.sold||0;
+  }catch(e){console.error(e)}
+}
+
+function viewTrend(id){
+  // 移除已有弹窗
+  var old=document.getElementById('trend-overlay');if(old)old.remove();
+  
+  // 检查缓存
+  var cached=trendCache[id];
+  if(!cached||!cached.data){
+    showToast('暂无趋势数据',1500);
+    return;
+  }
+  
+  // 默认显示24小时趋势
+  var defaultRange='1d';
+  var vals=cached.data[defaultRange];
+  if(!vals||!vals.length){
+    showToast('暂无趋势数据',1500);
+    return;
+  }
+  vals=vals.filter(function(v){return v!==null});
+  if(!vals.length){
+    showToast('暂无趋势数据',1500);
+    return;
+  }
+  
+  // 创建遮罩层
+  var overlay=document.createElement('div');
+  overlay.id='trend-overlay';
+  overlay.className='trend-overlay';
+  overlay.onclick=function(e){if(e.target===overlay)closeTrendPopup()};
+  
+  // 创建浮动面板
+  var popup=document.createElement('div');
+  popup.className='trend-popup-modal';
+  popup.innerHTML='<div class="trend-popup-head"><div class="trend-spacer"></div><div class="trend-range-btns"><button class="trend-btn active" data-range="1d" onclick="switchTrendRange('+id+',\'1d\',this)">24小时</button><button class="trend-btn" data-range="7d" onclick="switchTrendRange('+id+',\'7d\',this)">7天</button></div><button class="trend-close" onclick="closeTrendPopup()">✕</button></div><canvas id="trend-popup-canvas"></canvas>';
+  
+  overlay.appendChild(popup);
+  document.body.appendChild(overlay);
+  
+  // ESC键关闭
+  document.addEventListener('keydown',function escHandler(e){
+    if(e.key==='Escape'){closeTrendPopup();document.removeEventListener('keydown',escHandler)}
+  });
+  
+  // 画图
+  drawSmoothCurve('trend-popup-canvas',vals,defaultRange);
+}
+
+function closeTrendPopup(){
+  var overlay=document.getElementById('trend-overlay');
+  if(overlay)overlay.remove();
+}
+
+function switchTrendRange(id,range,btn){
+  // 更新按钮状态
+  var btns=btn.parentElement.querySelectorAll('.trend-btn');
+  btns.forEach(function(b){b.classList.remove('active')});
+  btn.classList.add('active');
+  
+  // 获取数据
+  var cached=trendCache[id];
+  if(!cached||!cached.data||!cached.data[range]){
+    showToast('暂无该时间范围的趋势数据',1500);
+    return;
+  }
+  
+  var vals=cached.data[range].filter(function(v){return v!==null});
+  if(!vals.length){
+    showToast('暂无趋势数据',1500);
+    return;
+  }
+  
+  // 重新绘制
+  drawSmoothCurve('trend-popup-canvas',vals,range);
+}
+
+function drawSmoothCurve(canvasId,values,timeRange){
+  var canvas=document.getElementById(canvasId);
+  if(!canvas||!values.length)return;
+  var ctx=canvas.getContext('2d');
+  var dpr=window.devicePixelRatio||1;
+  var w=canvas.parentElement.clientWidth-24;
+  var h=200;
+  canvas.width=w*dpr;canvas.height=h*dpr;
+  canvas.style.width=w+'px';canvas.style.height=h+'px';
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+  
+  var mn=0;
+  var mx=Math.max.apply(null,values)*1.15;
+  if(mx===0)mx=1;
+  var pad=8;
+  var leftPad=50;
+  var bottomPad=28;
+  var topPad=12;
+  
+  // 计算Y轴刻度（5个刻度：最大值、3/4、1/2、1/4、最小值）
+  var dataRange=mx-mn;
+  var ticks=[];
+  for(var i=0;i<5;i++){
+    ticks.push(mx-dataRange*(i/4));
+  }
+  
+  // 绘制网格线和Y轴标签
+  ctx.strokeStyle='rgba(255,255,255,0.08)';
+  ctx.lineWidth=1;
+  ctx.fillStyle='rgba(255,255,255,0.5)';
+  ctx.font='11px sans-serif';
+  ctx.textAlign='right';
+  ctx.textBaseline='middle';
+  
+  for(var i=0;i<ticks.length;i++){
+    var y=topPad+((h-topPad-bottomPad)*(i/(ticks.length-1)));
+    // 网格线
+    if(i>0){
+      ctx.beginPath();
+      ctx.moveTo(leftPad,y);
+      ctx.lineTo(w-pad,y);
+      ctx.stroke();
+    }
+    // Y轴标签
+    var label=ticks[i]>=1000?(ticks[i]/1000).toFixed(1)+'k':ticks[i].toFixed(1);
+    ctx.fillText(label,leftPad-8,y);
+  }
+  
+  // 绘制数据区域
+  var graphW=w-leftPad-pad;
+  var graphH=h-topPad-bottomPad;
+  
+  // 计算点坐标
+  var points=[];
+  for(var i=0;i<values.length;i++){
+    var x=leftPad+graphW*(i/(values.length-1||1));
+    var y=topPad+graphH*(1-(values[i]-mn)/(mx-mn));
+    points.push({x:x,y:y});
+  }
+  
+  // 使用贝塞尔曲线绘制平滑曲线
+  ctx.beginPath();
+  ctx.moveTo(points[0].x,points[0].y);
+  
+  if(points.length===1){
+    ctx.arc(points[0].x,points[0].y,3,0,Math.PI*2);
+    ctx.fillStyle='#af6025';
+    ctx.fill();
+  }else if(points.length===2){
+    ctx.lineTo(points[1].x,points[1].y);
+    ctx.strokeStyle='#af6025';
+    ctx.lineWidth=2;
+    ctx.stroke();
+  }else{
+    for(var i=1;i<points.length;i++){
+      var cpX=(points[i-1].x+points[i].x)/2;
+      var cpY=(points[i-1].y+points[i].y)/2;
+      ctx.quadraticCurveTo(points[i-1].x,points[i-1].y,cpX,cpY);
+    }
+    ctx.lineTo(points[points.length-1].x,points[points.length-1].y);
+    ctx.strokeStyle='#af6025';
+    ctx.lineWidth=2;
+    ctx.stroke();
+    
+    // 填充渐变
+    ctx.lineTo(points[points.length-1].x,h-bottomPad);
+    ctx.lineTo(leftPad,h-bottomPad);
+    ctx.closePath();
+    var gradient=ctx.createLinearGradient(0,topPad,0,h-bottomPad);
+    gradient.addColorStop(0,'rgba(175,96,37,0.25)');
+    gradient.addColorStop(1,'rgba(175,96,37,0.02)');
+    ctx.fillStyle=gradient;
+    ctx.fill();
+  }
+  
+  // 底部标注时间范围和单位
+  ctx.fillStyle='rgba(255,255,255,0.4)';ctx.font='11px sans-serif';ctx.textAlign='right';ctx.textBaseline='bottom';
+  var rangeText=timeRange==='1d'?'24小时':'7天';
+  ctx.fillText('单位: 神圣石 · '+rangeText,w-pad,h-4);
+  
+  // 绘制Y轴线
+  ctx.strokeStyle='rgba(255,255,255,0.15)';
+  ctx.beginPath();
+  ctx.moveTo(leftPad,topPad);
+  ctx.lineTo(leftPad,h-bottomPad);
+  ctx.stroke();
+  
+  // 绘制X轴线
+  ctx.beginPath();
+  ctx.moveTo(leftPad,h-bottomPad);
+  ctx.lineTo(w-pad,h-bottomPad);
+  ctx.stroke();
+}
+
+/* 弹窗 */
+function showModal(title,placeholder,defVal,onOk,minVal){
+  var bg=document.createElement('div');
+  bg.className='modal-bg';
+  bg.innerHTML='<div class="modal"><h3>'+title+'</h3><label>'+placeholder+'</label><input type="number" id="modal-input" value="'+defVal+'" min="'+(minVal||300)+'" step="60"><div class="btns"><button class="btn-ok" id="modal-ok">确定</button><button class="btn-no" id="modal-no">取消</button></div></div>';
+  document.body.appendChild(bg);
+  var inp=document.getElementById('modal-input');
+  inp.focus();inp.select();
+  function close(){bg.remove()}
+  document.getElementById('modal-ok').onclick=function(){var v=inp.value;close();onOk(v)};
+  document.getElementById('modal-no').onclick=close;
+  bg.addEventListener('click',function(e){if(e.target===bg)close()});
+  inp.addEventListener('keydown',function(e){if(e.key==='Enter'){var v=inp.value;close();onOk(v)}});
+}
+
+async function loadExistingTargets(){
+  var h=authH();
+  try{
+    var r=await fetch(API+'/targets',{headers:h});
+    if(!r.ok)return;
+    var targets=await r.json();
+    // 只加载 global 类型的监控
+    var globalTargets=targets.filter(function(t){return t.target_type==='global'});
+    globalTargets.forEach(function(t){renderCardFromTarget(t)});
+    // 初始化拖拽排序
+    setTimeout(initMcSortable,100);
+  }catch(e){console.error('加载监控目标失败:',e)}
+}
+
+// 监控卡片拖拽排序
+var mcSortableInstance=null;
+function initMcSortable(){
+  var container=document.getElementById('mc-wrap');
+  if(!container)return;
+  if(mcSortableInstance)mcSortableInstance.destroy();
+  mcSortableInstance=new Sortable(container,{
+    animation:150,
+    handle:'.mc-head',
+    ghostClass:'mc-ghost',
+    filter:'.mc-meta,.mc-btns,.mc-btn,.mc-toggle,.mc-interval,.mc-period,.mc-period button',
+    onEnd:function(){
+      var items=container.querySelectorAll('.mc');
+      var newOrder=Array.from(items).map(function(item){
+        return parseInt(item.getAttribute('data-id'));
+      });
+      var h=Object.assign({'Content-Type':'application/json'},authH());
+      fetch(API+'/targets/sort',{method:'PUT',headers:h,body:JSON.stringify({order:newOrder})})
+        .then(function(r){
+          if(r.ok)showToast('✅ 排序已保存',1500);
+          else showToast('❌ 排序保存失败',2000);
+        })
+        .catch(function(e){showToast('❌ '+e.message,2000)});
+    }
+  });
+}
+
+function checkLoginStatus() {
+  var token = localStorage.getItem("token");
+  var username = localStorage.getItem("username");
+  var userArea = document.getElementById("userArea");
+  var mainContent = document.getElementById("mainContent");
+  if (token) {
+    closeLoginModal();
+    userArea.innerHTML = '<span class="user-name">'+(username||'用户')+'</span> <button class="btn-logout" onclick="doLogout()">退出</button>';
+    mainContent.style.display = "block";
+    // 从API获取真实用户名，覆盖localStorage旧值
+    fetch('/api/user',{headers:{'Authorization':'Bearer '+token}}).then(function(r){return r.json()}).then(function(d){
+      if(d.username){
+        localStorage.setItem('username',d.username);
+        var el=document.querySelector('.user-name');
+        if(el)el.textContent=d.username;
+      }
+      // 保存管理员状态
+      isAdmin=d.is_admin||false;
+    }).catch(function(){});
+    // 加载已有监控目标
+    loadExistingTargets();
+  } else {
+    userArea.innerHTML = '<button onclick="showLoginModal()">登录</button>';
+    mainContent.style.display = "none";
+  }
+}
+function doLogout() {
+  localStorage.removeItem("token");
+  localStorage.removeItem("username");
+  checkLoginStatus();
+}
+function showLoginModal() {
+  document.getElementById("loginModal").style.display = "flex";
+}
+function closeLoginModal() {
+  document.getElementById("loginModal").style.display = "none";
+}
+async function doLogin() {
+  var username = document.getElementById("loginUsername").value;
+  var password = document.getElementById("loginPassword").value;
+  if (!username || !password) { showToast("⚠️ 请输入用户名和密码", 3000); return; }
+  try {
+    var r = await fetch("/auth/login", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({username: username, password: password})
+    });
+    var d = await r.json();
+    if (!r.ok) { showToast("❌ " + (d.msg || "登录失败"), 3000); return; }
+    localStorage.setItem("token", d.access_token);
+    localStorage.setItem("username", d.username || username);
+    closeLoginModal();
+    checkLoginStatus();
+    showToast("✅ 登录成功", 2000);
+  } catch(e) { showToast("❌ 请求失败: " + e.message, 3000); }
+}
+document.addEventListener('DOMContentLoaded',init);
+</script>
+<!-- 登录弹窗 -->
+<div id="loginModal" style="display:none">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title">登录</div>
+      <button class="close-btn" onclick="closeLoginModal()">×</button>
+    </div>
+    <div class="form-group">
+      <label>用户名</label>
+      <input id="loginUsername" type="text" placeholder="用户名">
+    </div>
+    <div class="form-group">
+      <label>密码</label>
+      <input id="loginPassword" type="password" placeholder="密码">
+    </div>
+    <button onclick="doLogin()" class="btn-login">登录</button>
+  </div>
+</div>
+
+</body>
+
+</html>
+
+

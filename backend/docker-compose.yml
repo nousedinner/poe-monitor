@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  poe:
+    build: .
+    container_name: poe-monitor
+    restart: always
+    network_mode: "host"          # 使用宿主机网络，可直接访问宿主机上的 MySQL 容器（127.0.0.1:3306）
+    environment:
+      - DATABASE_URL=mysql+pymysql://poe:***@127.0.0.1/poe_monitor?charset=utf8mb4
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - POESESSID_ENCRYPTION_KEY=${POESESSID_ENCRYPTION_KEY}
+      - TZ=Asia/Shanghai
+    env_file:
+      - .env                     # 加载环境变量（确保 .env 文件存在）
+    volumes:
+      - /var/log/poe-monitor:/var/log/poe-monitor   # 挂载日志目录（可选，保持宿主机日志）
+    # 因为使用 host 网络，无需 ports 映射

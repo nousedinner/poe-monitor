@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POE 市集监控</title>
+    <link rel="stylesheet" href="style.css?v=2026041602">
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+    <link rel="icon" type="image/png" href="/favicon.png">
+</head>
+<body>
+<div id="app" class="app-container">
+    <!-- 头部 -->
+    <div class="app-header">
+        <div class="header-title">
+            <h1>POE 市集监控</h1>
+            <a href="/global_search.html" style="margin-left: 16px; padding: 8px 20px; background: rgba(255,255,255,0.1); backdrop-filter: blur(4px); border: 1px solid rgba(255,255,255,0.2); color: var(--primary-color); border-radius: 50px; font-weight: 600; text-decoration: none; font-size: 0.85em; transition: all 0.3s;" onmouseover="this.style.background='var(--primary-color)';this.style.color='#000';this.style.borderColor='var(--primary-color)'" onmouseout="this.style.background='rgba(255,255,255,0.1)';this.style.color='var(--primary-color)';this.style.borderColor='rgba(255,255,255,0.2)'">🔍 全服搜索</a>
+        </div>
+        <div class="user-area">
+            <div v-if="!token">
+                <button @click="openLoginModal">登录</button>
+            </div>
+            <div v-else>
+                <span>{{ username }}</span>
+                <button @click="logout">退出</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 登录模态框 -->
+    <div v-if="!token" class="modal active" id="loginModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">登录</div>
+                <button class="close-btn" @click="closeLoginModal">×</button>
+            </div>
+            <div>
+                <div class="form-group">
+                    <label>用户名</label>
+                    <input v-model="loginUsername" type="text" placeholder="用户名">
+                </div>
+                <div class="form-group">
+                    <label>密码</label>
+                    <input v-model="loginPassword" type="password" placeholder="密码">
+                </div>
+                <button class="btn btn-primary" @click="login">登录</button>
+                <div class="error" style="margin-top:10px;">{{ errorMsg }}</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 已登录内容 -->
+    <div v-else>
+        <!-- 监控目标列表（全宽） -->
+        <div class="card">
+            <h3>监控目标列表</h3>
+            <div style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center;">
+                <button class="btn btn-sm" @click="loadTargets">刷新列表</button>
+                <button class="btn btn-sm" @click="showLogsModal = true">查看异常日志</button>
+            </div>
+            <div class="targets-list">
+                <div v-for="t in targets" :key="t.id" class="target-item" :data-id="t.id">
+                    <div class="target-name">
+    {{ t.poe_account_name }}
+    <span class="drag-bar" data-tip="拖拽排序"></span>
+</div>
+                    <div class="target-stats">
+                        <div>
+                            昨日售出: <span class="stat-value">{{ t.yesterday_divine }}</span> 神圣石
+                            <span v-if="t.yesterday_chaos"> <span class="stat-value">{{ t.yesterday_chaos }}</span> 混沌石</span>
+                        </div>
+                        <div>
+                            今日售出: <span class="stat-value">{{ t.today_divine }}</span> 神圣石
+                            <span v-if="t.today_chaos"> <span class="stat-value">{{ t.today_chaos }}</span> 混沌石</span>
+                        </div>
+                        <div>
+                            在售总价: 
+                            <span v-if="t.current_mirror"><span class="stat-value">{{ t.current_mirror }}</span> 镜</span>
+                            <span v-if="t.current_divine"><span class="stat-value">{{ t.current_divine }}</span> 神圣石</span>
+                            <span v-if="t.current_chaos"><span class="stat-value">{{ t.current_chaos }}</span> 混沌石</span>
+                        </div>
+                    </div>
+                    <div class="target-info">
+                        <span>扫描间隔: {{ t.scan_interval }} 秒</span>
+                        <span>最低价格: {{ t.min_price ?? '无限制' }} 神圣石</span>
+                        <span>最后扫描: {{ formatDate(t.last_scan) || '未扫描' }}</span>
+                        <span>今日新增: {{ t.today_new }} | 今日售出: {{ t.today_sold_count }}</span>
+                    </div>
+                    <div class="target-controls">
+                        <label class="toggle-switch">
+                            <input type="checkbox" v-model="t.enabled" @change="toggleEnabled(t)">
+                            <span>启用监控</span>
+                        </label>
+                        <input v-model="t.editInterval" :placeholder="t.scan_interval" style="width:80px;">
+                        <input v-model="t.editMinPrice" :placeholder="t.min_price ?? '无限制'" style="width:100px;">
+                        <button class="btn btn-primary btn-sm" @click="updateTarget(t)">修改</button>
+                        <button class="btn btn-danger btn-sm" @click="deleteTarget(t.id)">删除</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 添加目标 + 凭证管理（全宽） -->
+        <div class="card">
+            <h3>添加监控目标</h3>
+            <div class="form-group">
+                <input v-model="newTarget.account" placeholder="POE 账号名 (如 黑黑黑黑黑白#3537)">
+            </div>
+            <div class="form-group">
+                <input v-model="newTarget.interval" type="number" placeholder="扫描间隔(秒)" :min="minInterval">
+                <div style="font-size: 0.8rem; color: var(--text-muted);">最小间隔: {{ minInterval }} 秒</div>
+            </div>
+            <div class="form-group">
+                <input v-model="newTarget.minPrice" type="number" placeholder="最低价格(神圣石)">
+            </div>
+            <button class="btn btn-primary" @click="addTarget">添加目标</button>
+        </div>
+
+        <div class="card">
+            <h3>凭证管理</h3>
+            <div class="form-group">
+                <input v-model="cookieString" placeholder="POESESSID Cookie（粘贴完整cookie或纯值均可）">
+            </div>
+            <button class="btn btn-primary" @click="saveCredentials">保存凭证</button>
+            <div style="margin-top: 5px; font-size: 0.85rem;">上次更新: {{ credLastUpdated || '未设置' }}</div>
+        </div>
+
+        <!-- 历史事件（底部全宽） -->
+        <div class="history-section">
+            <div class="card">
+                <h3>历史事件</h3>
+                <div class="history-filters">
+                    <select v-model="selectedTargetId">
+                        <option value="">选择监控目标</option>
+                        <option v-for="t in targets" :value="t.id">{{ t.poe_account_name }}</option>
+                    </select>
+                    <select v-model="eventTypeFilter">
+                        <option value="">全部</option>
+                        <option value="listed">上架</option>
+                        <option value="sold">售出</option>
+                        <option value="price_change">改价</option>
+                    </select>
+                    <button class="btn btn-primary btn-sm" @click="resetAndLoadEvents">查询</button>
+                    <button class="btn btn-primary btn-sm" @click="openAllEventsModal">查询全部</button>
+                </div>
+                <div class="event-list">
+                    <template v-for="item in displayEvents" :key="item.id">
+                        <div class="event-item" style="margin-bottom: 8px;">
+                            <div>
+                                <span class="event-type" :class="item.event_type">
+                                    {{ item.event_type === 'listed' ? '上架' : (item.event_type === 'sold' ? '售出' : '改价') }}
+                                </span>
+                                <strong>{{ item.item_name }} {{ item.base_type }}</strong>
+                                <span v-if="item.target_name" style="color: var(--text-muted);"> ({{ item.target_name }})</span>
+                            </div>
+                            <div v-if="getAllMods(item).length" style="margin-top: 4px; font-size: 0.85rem; color: var(--text-muted);">
+                                词缀：{{ getAllMods(item).join('； ') }}
+                            </div>
+                            <div style="margin-top: 4px;">
+                                价格: 
+                                <span v-if="item.event_type === 'price_change'">
+                                    {{ item.price_old }} → {{ item.price }}
+                                    <span v-if="item.price_currency === 'mirror'"> 镜</span>
+                                    <span v-else-if="item.price_currency === 'chaos'"> 混沌石</span>
+                                    <span v-else> 神圣石</span>
+                                </span>
+                                <span v-else>
+                                    {{ item.price }}
+                                    <span v-if="item.price_currency === 'mirror'"> 镜</span>
+                                    <span v-else-if="item.price_currency === 'chaos'"> 混沌石</span>
+                                    <span v-else> 神圣石</span>
+                                </span>
+                                <span style="float:right;">{{ formatDate(item.created_at) }}</span>
+                            </div>
+                            <div v-if="item.redundantCount > 0" style="margin-top: 6px; font-size: 0.85rem;">
+                                <span class="redundant-toggle" @click="toggleExpand(item.fingerprint)" style="cursor: pointer; color: var(--primary-color);">
+                                    {{ expandedGroups[item.fingerprint] ? '收起重复记录' : `${item.redundantCount} 条重复记录，点击展开` }}
+                                </span>
+                            </div>
+                            <div v-if="expandedGroups[item.fingerprint] && item.redundantItems && item.redundantItems.length" class="redundant-items" style="margin-top: 8px; padding-left: 16px; border-left: 2px solid var(--text-muted);">
+                                <div v-for="r in item.redundantItems" :key="r.id" class="event-item redundant-item" style="margin-top: 4px;">
+                                    <div>
+                                        <span class="event-type" :class="r.event_type">
+                                            {{ r.event_type === 'listed' ? '上架' : (r.event_type === 'sold' ? '售出' : '改价') }}
+                                        </span>
+                                        <strong>{{ r.item_name }} {{ r.base_type }}</strong>
+                                        <span v-if="r.target_name" style="color: var(--text-muted);"> ({{ r.target_name }})</span>
+                                    </div>
+                                    <div v-if="getAllMods(r).length" style="margin-top: 4px; font-size: 0.85rem; color: var(--text-muted);">
+                                        词缀：{{ getAllMods(r).join('； ') }}
+                                    </div>
+                                    <div style="margin-top: 4px;">
+                                        价格: 
+                                        <span v-if="r.event_type === 'price_change'">
+                                            {{ r.price_old }} → {{ r.price }}
+                                            <span v-if="r.price_currency === 'mirror'"> 镜</span>
+                                            <span v-else-if="r.price_currency === 'chaos'"> 混沌石</span>
+                                            <span v-else> 神圣石</span>
+                                        </span>
+                                        <span v-else>
+                                            {{ r.price }}
+                                            <span v-if="r.price_currency === 'mirror'"> 镜</span>
+                                            <span v-else-if="r.price_currency === 'chaos'"> 混沌石</span>
+                                            <span v-else> 神圣石</span>
+                                        </span>
+                                        <span style="float:right;">{{ formatDate(r.created_at) }}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                    <div v-if="events.length === 0" style="padding:15px; text-align:center;">暂无事件</div>
+                </div>
+                <div class="flex" style="justify-content: center; margin-top: 10px;">
+                    <button v-if="eventHasMore" class="btn btn-sm" @click="loadMoreEvents">加载更多</button>
+                    <span v-else-if="events.length > 0" style="color: var(--text-muted);">已无更多记录</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 全部事件查询模态框 -->
+    <div class="modal" :class="{ active: showAllEventsModal }">
+        <div class="modal-content" style="max-width: 400px;">
+            <div class="modal-header">
+                <div class="modal-title">查询全部事件</div>
+                <button class="close-btn" @click="closeAllEventsModal">×</button>
+            </div>
+            <div class="form-group">
+                <label>事件类型</label>
+                <select v-model="allEventsType">
+                    <option value="">全部</option>
+                    <option value="listed">上架</option>
+                    <option value="sold">售出</option>
+                    <option value="price_change">改价</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>最低价格（神圣石）</label>
+                <input type="number" v-model="allEventsMinPrice" placeholder="不限制">
+            </div>
+            <div class="flex" style="justify-content: flex-end;">
+                <button class="btn" @click="closeAllEventsModal">取消</button>
+                <button class="btn btn-primary" @click="fetchAllEvents">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 异常日志模态框 -->
+    <div class="modal" :class="{ active: showLogsModal }">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">异常日志</div>
+                <button class="close-btn" @click="showLogsModal = false">×</button>
+            </div>
+            <div class="event-list" style="max-height: 400px;">
+                <div v-if="logs.length === 0" style="padding:15px; text-align:center;">暂无异常</div>
+                <div v-for="log in logs" :key="log" class="event-item" style="font-family: monospace; font-size: 0.85rem;">
+                    {{ log }}
+                </div>
+            </div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 15px;">
+                <button class="btn" @click="fetchLogs">刷新日志</button>
+                <button class="btn btn-primary" @click="showLogsModal = false">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <div v-if="message" class="message" :class="'message-'+message.type">
+        {{ message.text }}
+    </div>
+    <!-- 2026.4.4 新增：悬浮滚动按钮 -->
+    <button class="scroll-btn scroll-top" @click="scrollToTop" title="回顶部">
+        <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    </button>
+    <button class="scroll-btn scroll-bottom" @click="scrollToBottom" title="去底部">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+    </button>
+</div>
+
+<script>
+    const { createApp, ref, nextTick } = Vue;
+    const BASE_URL = '';
+
+    createApp({
+        setup() {
+            const token = ref(localStorage.getItem('token') || null);
+            const username = ref('');
+            const cookieString = ref('');
+            const errorMsg = ref('');
+            const loginUsername = ref('');
+            const loginPassword = ref('');
+            const targets = ref([]);
+            const newTarget = ref({ account: '', interval: 60, minPrice: null });
+            const credLastUpdated = ref('');
+            const events = ref([]);
+            const selectedTargetId = ref('');
+            const eventTypeFilter = ref('');
+            const logs = ref([]);
+            const showLogsModal = ref(false);
+            const minInterval = ref(60);
+            const message = ref(null);
+
+            // 分页相关（用于按目标查询）
+            const eventOffset = ref(0);
+            const eventLimit = ref(50);
+            const eventHasMore = ref(true);
+
+            // 全部事件相关
+            const showAllEventsModal = ref(false);
+            const allEventsType = ref('');
+            const allEventsMinPrice = ref(null);
+            let allEventsFiltered = [];
+            let allEventsCurrentOffset = 0;
+            const allEventsPageSize = 50;
+
+            // 冗余事件折叠状态
+            const expandedGroups = ref({});
+
+            // 展示事件列表
+            const displayEvents = ref([]);
+
+            // 自动刷新定时器
+            let refreshInterval = null;
+
+            // 拖拽排序实例
+            let sortableInstance = null;
+
+            const showMessage = (text, type = 'info') => {
+                message.value = { text, type };
+                setTimeout(() => message.value = null, 3000);
+            };
+
+            const apiRequest = async (url, method = 'GET', body = null) => {
+                const headers = { 'Content-Type': 'application/json' };
+                if (token.value) headers['Authorization'] = `Bearer ${token.value}`;
+                const options = { method, headers };
+                if (body) options.body = JSON.stringify(body);
+                const res = await fetch(`${BASE_URL}${url}`, options);
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.msg || '请求失败');
+                }
+                return res.json();
+            };
+
+            // 找出冗余事件ID列表（前端分组）
+            const findRedundantIds = (eventsList) => {
+                const normalEvents = eventsList.filter(e => !e.is_gem && (e.event_type === 'listed' || e.event_type === 'sold'));
+                const groups = {};
+                for (const ev of normalEvents) {
+                    // 跳过全服监控事件（仅清理账号监控）
+                    if (ev.target_type === 'global') continue;
+                    const fingerprint = `${ev.item_name}|${ev.base_type}|${JSON.stringify(ev.explicit_mods)}`;
+                    if (!groups[fingerprint]) groups[fingerprint] = [];
+                    groups[fingerprint].push(ev);
+                }
+                const redundantIds = [];
+                for (const fingerprint in groups) {
+                    const group = groups[fingerprint];
+                    if (group.length < 2) continue;
+                    group.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+                    let firstListed = null;
+                    let lastSold = null;
+                    for (const ev of group) {
+                        if (ev.event_type === 'listed' && !firstListed) firstListed = ev;
+                        if (ev.event_type === 'sold') lastSold = ev;
+                    }
+                    for (const ev of group) {
+                        if (ev === firstListed || ev === lastSold) continue;
+                        redundantIds.push(ev.id);
+                    }
+                }
+                return redundantIds;
+            };
+
+            // 标记冗余
+            const markRedundant = async (eventIds) => {
+                if (eventIds.length === 0) return;
+                try {
+                    await apiRequest('/api/events/mark_redundant', 'POST', { event_ids: eventIds });
+                    console.log(`标记了 ${eventIds.length} 条冗余事件`);
+                } catch (e) {
+                    console.error('标记冗余失败', e);
+                }
+            };
+
+            // 全量清理
+            const fullClean = async () => {
+                const url = `/api/events/all?is_redundant=0&is_gem=0&limit=10000`;
+                try {
+                    const data = await apiRequest(url);
+                    const redundantIds = findRedundantIds(data.events);
+                    await markRedundant(redundantIds);
+                } catch (e) {
+                    console.error('全量清理失败', e);
+                }
+            };
+
+            // 增量清理（最近24小时）
+            const incrementalClean = async () => {
+                const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+                const url = `/api/events/all?is_redundant=0&is_gem=0&since=${since}&limit=10000`;
+                try {
+                    const data = await apiRequest(url);
+                    const redundantIds = findRedundantIds(data.events);
+                    await markRedundant(redundantIds);
+                } catch (e) {
+                    console.error('增量清理失败', e);
+                }
+            };
+
+            let cleanInterval = null;
+
+            const login = async () => {
+                try {
+                    const data = await apiRequest('/auth/login', 'POST', { username: loginUsername.value, password: loginPassword.value });
+                    token.value = data.access_token;
+                    localStorage.setItem('token', token.value);
+                    errorMsg.value = '';
+                    await fetchUserInfo();
+                    await loadTargets();
+                    await loadCredentials();
+                    await fetchLogs();
+                    await fullClean();
+                    if (cleanInterval) clearInterval(cleanInterval);
+                    cleanInterval = setInterval(() => {
+                        if (token.value) incrementalClean();
+                    }, 5 * 60 * 1000);
+                    // 启动自动刷新（每 8 分钟）
+                    if (refreshInterval) clearInterval(refreshInterval);
+                    refreshInterval = setInterval(() => {
+                        if (token.value) loadTargets();
+                    }, 8 * 60 * 1000);
+                    showMessage('登录成功', 'success');
+                } catch (e) {
+                    errorMsg.value = e.message;
+                }
+            };
+
+            const logout = () => {
+                token.value = null;
+                localStorage.removeItem('token');
+                localStorage.removeItem('username');
+                targets.value = [];
+                username.value = '';
+                if (cleanInterval) clearInterval(cleanInterval);
+                if (refreshInterval) clearInterval(refreshInterval);
+                if (sortableInstance) sortableInstance.destroy();
+                sortableInstance = null;
+                showMessage('已退出', 'info');
+            };
+
+            const fetchUserInfo = async () => {
+                try {
+                    const data = await apiRequest('/api/user');
+                    username.value = data.username;
+                    localStorage.setItem('username', data.username);
+                    minInterval.value = data.is_admin ? 60 : 300;
+                } catch (e) {
+                    console.error(e);
+                }
+            };
+
+            const initSortable = () => {
+                const container = document.querySelector('.targets-list');
+                if (!container) return;
+                if (sortableInstance) sortableInstance.destroy();
+                sortableInstance = new Sortable(container, {
+                    animation: 150,
+                    handle: '.drag-bar',          // 使用名字后面的小条拖拽
+                    onEnd: async () => {
+                        const items = container.querySelectorAll('.target-item');
+                        const newOrder = Array.from(items).map(item => {
+                            return parseInt(item.getAttribute('data-id'));
+                        });
+                        // 更新本地 targets 数组顺序
+                        const newTargets = [];
+                        for (const id of newOrder) {
+                            const target = targets.value.find(t => t.id === id);
+                            if (target) newTargets.push(target);
+                        }
+                        targets.value = newTargets;
+                        // 调用后端保存排序
+                        try {
+                            await apiRequest('/api/targets/sort', 'PUT', { order: newOrder });
+                            showMessage('排序已保存', 'success');
+                        } catch (e) {
+                            showMessage(e.message, 'error');
+                            // 如果后端失败，重新加载以恢复原顺序
+                            await loadTargets();
+                        }
+                    }
+                });
+            };
+
+            const loadTargets = async () => {
+                try {
+                    const data = await apiRequest('/api/targets');
+                    targets.value = data.filter(t => t.target_type === 'account').map(t => ({
+                        ...t,
+                        editInterval: t.scan_interval,
+                        editMinPrice: t.min_price ?? '',
+                        enabled: t.enabled !== undefined ? t.enabled : true,
+                        yesterday_divine: t.yesterday_divine || 0,
+                        yesterday_chaos: t.yesterday_chaos || 0,
+                        today_divine: t.today_divine || 0,
+                        today_chaos: t.today_chaos || 0,
+                        current_divine: t.current_divine || 0,
+                        current_chaos: t.current_chaos || 0,
+                        current_mirror: t.current_mirror || 0,
+                        today_sold_count: t.today_sold_count || 0,
+                        today_new: t.today_new || 0
+                    }));
+                    await nextTick();
+                    initSortable();
+                } catch (e) {
+                    showMessage(e.message, 'error');
+                }
+            };
+
+            const addTarget = async () => {
+                try {
+                    const body = {
+                        poe_account_name: newTarget.value.account,
+                        scan_interval: parseInt(newTarget.value.interval),
+                        min_price: newTarget.value.minPrice ? parseInt(newTarget.value.minPrice) : null
+                    };
+                    await apiRequest('/api/targets', 'POST', body);
+                    await loadTargets();
+                    newTarget.value = { account: '', interval: minInterval.value, minPrice: null };
+                    showMessage('目标添加成功', 'success');
+                } catch (e) {
+                    showMessage(e.message, 'error');
+                }
+            };
+
+            const updateTarget = async (target) => {
+                try {
+                    const body = {
+                        scan_interval: parseInt(target.editInterval),
+                        min_price: target.editMinPrice ? parseInt(target.editMinPrice) : null
+                    };
+                    await apiRequest(`/api/targets/${target.id}`, 'PUT', body);
+                    await loadTargets();
+                    showMessage('修改成功', 'success');
+                } catch (e) {
+                    showMessage(e.message, 'error');
+                }
+            };
+
+            const toggleEnabled = async (target) => {
+                try {
+                    const body = { enabled: target.enabled };
+                    await apiRequest(`/api/targets/${target.id}`, 'PUT', body);
+                    showMessage(`监控已${target.enabled ? '启用' : '停用'}`, 'success');
+                } catch (e) {
+                    showMessage(e.message, 'error');
+                    target.enabled = !target.enabled;
+                }
+            };
+
+            const deleteTarget = async (id) => {
+                if (!confirm('确定删除该监控目标吗？')) return;
+                try {
+                    await apiRequest(`/api/targets/${id}`, 'DELETE');
+                    await loadTargets();
+                    showMessage('删除成功', 'success');
+                } catch (e) {
+                    showMessage(e.message, 'error');
+                }
+            };
+
+            const saveCredentials = async () => {
+                try {
+                    const raw = cookieString.value;
+                    let poesessid = raw;
+                    let pt2gguin = null;
+                    if (raw.includes('POESESSID=')) {
+                        const m = raw.match(/POESESSID=([^;\s]+)/);
+                        if (m) poesessid = m[1];
+                    }
+                    if (raw.includes('pt2gguin=')) {
+                        const m = raw.match(/pt2gguin=([^;\s]+)/);
+                        if (m) pt2gguin = m[1];
+                    }
+                    await apiRequest('/api/credentials', 'POST', { poesessid, pt2gguin });
+                    await loadCredentials();
+                    cookieString.value = '';
+                    showMessage('凭证已保存', 'success');
+                } catch (e) {
+                    showMessage(e.message, 'error');
+                }
+            };
+
+            const loadCredentials = async () => {
+                try {
+                    const data = await apiRequest('/api/credentials');
+                    credLastUpdated.value = data.last_updated;
+                } catch (e) {
+                    console.error(e);
+                }
+            };
+
+            const loadEvents = async (append = false) => {
+                if (!selectedTargetId.value) {
+                    alert('请选择监控目标');
+                    return;
+                }
+                try {
+                    let url = `/api/targets/${selectedTargetId.value}/events?limit=${eventLimit.value}&offset=${eventOffset.value}`;
+                    if (eventTypeFilter.value) url += `&event_type=${eventTypeFilter.value}`;
+                    const data = await apiRequest(url);
+                    if (append) {
+                        events.value = [...events.value, ...data];
+                    } else {
+                        events.value = data;
+                        eventOffset.value = 0;
+                    }
+                    eventHasMore.value = data.length === eventLimit.value;
+                    updateDisplayEvents();
+                } catch (e) {
+                    showMessage(e.message, 'error');
+                }
+            };
+
+            const resetAndLoadEvents = () => {
+                eventOffset.value = 0;
+                loadEvents(false);
+            };
+
+            const loadMoreEvents = () => {
+                eventOffset.value += eventLimit.value;
+                loadEvents(true);
+            };
+
+            // 全部事件查询相关
+            const openAllEventsModal = () => {
+                allEventsType.value = '';
+                allEventsMinPrice.value = null;
+                showAllEventsModal.value = true;
+            };
+
+            const closeAllEventsModal = () => {
+                showAllEventsModal.value = false;
+            };
+
+            const fetchAllEvents = async () => {
+                if (targets.value.length === 0) {
+                    showMessage('暂无监控目标', 'error');
+                    return;
+                }
+                showMessage('正在加载所有事件...', 'info');
+                const promises = targets.value.map(async t => {
+                    try {
+                        let url = `/api/targets/${t.id}/events?limit=2000`;
+                        const data = await apiRequest(url);
+                        return data.map(e => ({ ...e, target_name: t.poe_account_name }));
+                    } catch (err) {
+                        console.error(`获取目标 ${t.id} 事件失败:`, err);
+                        return [];
+                    }
+                });
+                const results = await Promise.all(promises);
+                const allRaw = results.flat();
+
+                let filtered = allRaw;
+                if (allEventsType.value) {
+                    filtered = filtered.filter(e => e.event_type === allEventsType.value);
+                }
+                if (allEventsMinPrice.value !== null && allEventsMinPrice.value !== '') {
+                    const min = Number(allEventsMinPrice.value);
+                    filtered = filtered.filter(e => e.price_currency === 'divine' && e.price >= min);
+                }
+                filtered.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+                allEventsFiltered = filtered;
+                allEventsCurrentOffset = 0;
+                events.value = allEventsFiltered.slice(0, allEventsPageSize);
+                eventHasMore.value = allEventsFiltered.length > allEventsPageSize;
+                closeAllEventsModal();
+                showMessage(`加载完成，共 ${allEventsFiltered.length} 条事件`, 'success');
+                updateDisplayEvents();
+            };
+
+            const loadMoreAllEvents = () => {
+                if (allEventsFiltered.length === 0) return;
+                const nextOffset = allEventsCurrentOffset + allEventsPageSize;
+                const nextBatch = allEventsFiltered.slice(nextOffset, nextOffset + allEventsPageSize);
+                if (nextBatch.length) {
+                    events.value = [...events.value, ...nextBatch];
+                    allEventsCurrentOffset = nextOffset;
+                    eventHasMore.value = (nextOffset + allEventsPageSize) < allEventsFiltered.length;
+                } else {
+                    eventHasMore.value = false;
+                }
+                updateDisplayEvents();
+            };
+
+            // 核心：构建按时间倒序的展示列表，过滤技能宝石
+            const updateDisplayEvents = () => {
+                const priceChangeEvents = events.value.filter(e => e.event_type === 'price_change');
+                const normalEvents = events.value.filter(e => e.event_type !== 'price_change' && !e.is_gem);
+                const gemEvents = events.value.filter(e => e.event_type !== 'price_change' && e.is_gem);
+
+                const groups = {};
+                for (const ev of normalEvents) {
+                    // 跳过全服监控事件（仅清理账号监控）
+                    if (ev.target_type === 'global') continue;
+                    const fingerprint = `${ev.item_name}|${ev.base_type}|${JSON.stringify(ev.explicit_mods)}`;
+                    if (!groups[fingerprint]) groups[fingerprint] = [];
+                    groups[fingerprint].push(ev);
+                }
+
+                const nonRedundantEvents = [];
+                const redundantMap = {};
+
+                for (const fingerprint in groups) {
+                    const group = groups[fingerprint];
+                    group.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+                    const redundantItems = [];
+                    const nonRedundant = [];
+                    for (const ev of group) {
+                        if (ev.is_redundant) {
+                            redundantItems.push(ev);
+                        } else {
+                            nonRedundant.push(ev);
+                        }
+                    }
+                    if (redundantItems.length) {
+                        redundantMap[fingerprint] = { redundantItems };
+                    }
+                    for (const ev of nonRedundant) {
+                        nonRedundantEvents.push(ev);
+                    }
+                }
+
+                for (const ev of priceChangeEvents) {
+                    nonRedundantEvents.push(ev);
+                }
+
+                for (const ev of gemEvents) {
+                    nonRedundantEvents.push(ev);
+                }
+
+                nonRedundantEvents.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+                const newDisplay = [];
+                for (const ev of nonRedundantEvents) {
+                    if (ev.event_type === 'price_change') {
+                        newDisplay.push({
+                            ...ev,
+                            redundantCount: 0,
+                            redundantItems: [],
+                            fingerprint: `price_${ev.id}`
+                        });
+                    } else if (ev.is_gem) {
+                        newDisplay.push({
+                            ...ev,
+                            redundantCount: 0,
+                            redundantItems: [],
+                            fingerprint: `gem_${ev.id}`
+                        });
+                    } else {
+                        const fingerprint = `${ev.item_name}|${ev.base_type}|${JSON.stringify(ev.explicit_mods)}`;
+                        const redundant = redundantMap[fingerprint];
+                        newDisplay.push({
+                            ...ev,
+                            redundantCount: redundant ? redundant.redundantItems.length : 0,
+                            redundantItems: redundant ? redundant.redundantItems : [],
+                            fingerprint
+                        });
+                    }
+                }
+                displayEvents.value = newDisplay;
+            };
+
+            const toggleExpand = (fingerprint) => {
+                expandedGroups.value[fingerprint] = !expandedGroups.value[fingerprint];
+            };
+
+            const fetchLogs = async () => {
+                try {
+                    const data = await apiRequest('/api/logs');
+                    logs.value = data;
+                } catch (e) {
+                    console.error(e);
+                }
+            };
+
+            const formatDate = (isoString) => {
+                if (!isoString) return '';
+                if (!isoString.endsWith('Z') && !isoString.includes('+')) isoString += 'Z';
+                const date = new Date(isoString);
+                return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+            };
+
+            const openLoginModal = () => {
+                document.getElementById('loginModal').classList.add('active');
+            };
+            const closeLoginModal = () => {
+                document.getElementById('loginModal').classList.remove('active');
+            };
+                        // 2026.4.4 新增：滚动到顶部/底部
+            const scrollToTop = () => {
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            };
+            const scrollToBottom = () => {
+                window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+            };
+
+            // 滚动超过300px时显示上下箭头
+            const updateScrollBtns = () => {
+                const btns = document.querySelectorAll('.scroll-btn');
+                const show = window.scrollY > 300;
+                btns.forEach(b => {
+                    if (show) b.classList.add('visible');
+                    else b.classList.remove('visible');
+                });
+            };
+            window.addEventListener('scroll', updateScrollBtns);
+            updateScrollBtns();
+
+            if (token.value) {
+                fetchUserInfo().then(() => {
+                    loadTargets();
+                    loadCredentials();
+                    fetchLogs();
+                    fullClean();
+                    if (cleanInterval) clearInterval(cleanInterval);
+                    cleanInterval = setInterval(() => {
+                        if (token.value) incrementalClean();
+                    }, 5 * 60 * 1000);
+                    if (refreshInterval) clearInterval(refreshInterval);
+                    refreshInterval = setInterval(() => {
+                        if (token.value) loadTargets();
+                    }, 8 * 60 * 1000);
+                });
+            }
+
+            function getAllMods(item) {
+                const all = [];
+                ['explicit_mods','implicit_mods','fractured_mods','crafted_mods',
+                 'enchant_mods','mutated_mods','veiled_mods'].forEach(k => {
+                    if (item[k] && Array.isArray(item[k])) all.push(...item[k]);
+                });
+                return all;
+            }
+
+            return {
+                token, username, cookieString, errorMsg, loginUsername, loginPassword,
+                targets, newTarget, credLastUpdated, events, selectedTargetId, eventTypeFilter,
+                logs, showLogsModal, minInterval, message,
+                eventHasMore, showAllEventsModal, allEventsType, allEventsMinPrice,
+                displayEvents, expandedGroups,
+                login, logout, loadTargets, addTarget, updateTarget, toggleEnabled, deleteTarget,
+                saveCredentials, loadEvents: resetAndLoadEvents, resetAndLoadEvents, loadMoreEvents,
+                fetchLogs, formatDate, openLoginModal, closeLoginModal,
+                openAllEventsModal, closeAllEventsModal, fetchAllEvents, toggleExpand,scrollToTop, scrollToBottom,
+                getAllMods   // 2026.4.4 新增
+            };
+        }
+    }).mount('#app');
+</script>
+</body>
+</html>
