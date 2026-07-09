@@ -69,22 +69,25 @@ poe-monitor/
 
 ## 快速部署
 
+> **无需安装 MySQL、无需配置数据库** — Docker 一条命令全自动启动。
+
 ```bash
 # 1. 克隆
 git clone https://github.com/nousedinner/poe-monitor.git
 cd poe-monitor/backend
 
-# 2. 配置环境变量
+# 2. 配置密钥
 cp .env.example .env
-# 编辑 .env，填写 MySQL 连接、密钥等
+# 建议修改 .env 中的密钥（默认值也可直接使用）
 
-# 3. 启动
+# 3. 一键启动（自动拉取 MySQL + 构建后端）
 docker compose up -d --build
 
-# 4. 配置 nginx 反代（参考 nginx-example.conf）
+# 4. 访问 http://localhost:5000
+#    默认账号：admin / 密码从数据库添加
 ```
 
-> 首次启动前需要先配置 `.env` 中的 `DATABASE_URL`、`SECRET_KEY`、`JWT_SECRET_KEY`、`POESESSID_ENCRYPTION_KEY`。
+> 初次启动约1-2分钟（MySQL 初始化 + 健康检查），之后秒启。
 
 ## 关于作者
 

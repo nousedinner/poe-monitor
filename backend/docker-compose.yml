@@ -1,19 +1,55 @@
 version: '3.8'
 
 services:
+  mysql:
+    image: mysql:8.0
+    container_name: poe-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-poe_root_2024}
+      MYSQL_DATABASE: poe_monitor
+      MYSQL_USER: poe
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-poe_pass_2024}
+    ports:
+      - "3307:3306"    # 映射到 3307 避免与本地 MySQL 冲突
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-poe_root_2024}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    command: --local-infile=1
+    networks:
+      - poe-net
+
   poe:
     build: .
     container_name: poe-monitor
     restart: always
-    network_mode: "host"          # 使用宿主机网络，可直接访问宿主机上的 MySQL 容器（127.0.0.1:3306）
+    ports:
+      - "5000:5000"
     environment:
-      - DATABASE_URL=mysql+pymysql://poe:***@127.0.0.1/poe_monitor?charset=utf8mb4
+      - DATABASE_URL=mysql+pymysql://poe:${MYSQL_PASSWORD:-poe_pass_2024}@mysql:3306/poe_monitor?charset=utf8mb4
       - SECRET_KEY=${SECRET_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - POESESSID_ENCRYPTION_KEY=${POESESSID_ENCRYPTION_KEY}
       - TZ=Asia/Shanghai
     env_file:
-      - .env                     # 加载环境变量（确保 .env 文件存在）
+      - .env
     volumes:
-      - /var/log/poe-monitor:/var/log/poe-monitor   # 挂载日志目录（可选，保持宿主机日志）
-    # 因为使用 host 网络，无需 ports 映射
+      - poe_logs:/var/log/poe-monitor
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - poe-net
+
+volumes:
+  mysql_data:
+  poe_logs:
+
+networks:
+  poe-net:
+    driver: bridge
