@@ -7,6 +7,8 @@
 ### 新增
 - 全局搜索页移动端适配：搜索框两行布局（输入框全宽 + 三按钮平分）、下拉物品名单行省略号显示（global_search.html / global_search.css）
 - 建立本 CHANGELOG 机制：此后每次改动同步更新本文件并随代码提交
+- 缓存优化：`/api/trade/static`、`/api/trade/stats` 增加腾讯数据缓存（6h TTL，首次拉取存本地，所有用户共享，不再每次打腾讯 API；腾讯故障时兜底返回旧缓存）
+- 缓存优化：nginx 对 HTML/JSON/CSS/JS 统一 `no-cache` 协商缓存（ETag 自动失效，日常访问 304 零流量）
 
 ### 修复
 - 手机端点搜索框弹"自动填充密码"：页面登录弹窗含密码框导致浏览器误判登录场景。搜索框 autocomplete 改 new-password，登录框标注 username / current-password

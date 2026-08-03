@@ -7,8 +7,61 @@ from .models import MonitorTarget, UserCredential, Event, User, ItemSnapshot, Pr
 from .utils import encrypt_poesessid, decrypt_poesessid
 import json
 import requests
+import os
+import hashlib
+import time
 
 api_bp = Blueprint('api', __name__)
+
+# 腾讯静态数据缓存（赛季内数据不变，避免每个用户每次打开页面都打腾讯API）
+TRADE_CACHE_DIR = '/tmp/poe_trade_cache'
+TRADE_CACHE_TTL = 6 * 3600  # 6小时
+
+def _read_trade_cache(name, allow_stale=False):
+    """读取缓存，返回 (data_str, etag)；TTL 内或 allow_stale 时有效"""
+    path = os.path.join(TRADE_CACHE_DIR, name)
+    try:
+        mtime = os.path.getmtime(path)
+        if not allow_stale and time.time() - mtime > TRADE_CACHE_TTL:
+            return None, None
+        with open(path, 'r', encoding='utf-8') as f:
+            data = f.read()
+        return data, hashlib.md5(data.encode('utf-8')).hexdigest()
+    except (OSError, ValueError):
+        return None, None
+
+def _write_trade_cache(name, data):
+    try:
+        os.makedirs(TRADE_CACHE_DIR, exist_ok=True)
+        with open(os.path.join(TRADE_CACHE_DIR, name), 'w', encoding='utf-8') as f:
+            f.write(data)
+    except OSError:
+        pass
+
+def _cached_trade_response(name, upstream_url, label):
+    """通用缓存代理：优先缓存，未命中拉腾讯并写缓存；腾讯失败时兜底用旧缓存"""
+    cached, etag = _read_trade_cache(name)
+    if cached is not None:
+        resp = current_app.response_class(cached, mimetype='application/json')
+        resp.set_etag(etag)
+        resp.cache_control.no_cache = True
+        return resp.make_conditional(request)
+    try:
+        upstream = requests.get(upstream_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
+        data = upstream.text
+        _write_trade_cache(name, data)
+        resp = current_app.response_class(data, mimetype='application/json')
+        resp.set_etag(hashlib.md5(data.encode('utf-8')).hexdigest())
+        resp.cache_control.no_cache = True
+        return resp
+    except Exception as e:
+        stale, stale_etag = _read_trade_cache(name, allow_stale=True)
+        if stale is not None:
+            resp = current_app.response_class(stale, mimetype='application/json')
+            resp.set_etag(stale_etag)
+            resp.cache_control.no_cache = True
+            return resp
+        return jsonify({'msg': f'get {label} failed: {str(e)}'}), 500
 
 def convert_filters(filters):
     """转换前端传来的filters格式为POE API格式
@@ -170,7 +223,7 @@ def manage_targets():
         poe_account_name = data.get('poe_account_name')
         scan_interval = data.get('scan_interval', 120)
         min_price = data.get('min_price')
-        league = data.get('league', 'S29赛季')
+        league = data.get('league', 'S30赛季')
         query_params = data.get('query_params')
         user = User.query.get(user_id)
         min_interval = 60 if user.is_admin else 300
@@ -713,7 +766,7 @@ def global_search():
     poesessid = decrypt_poesessid(cred.encrypted_poesessid)
     pt2gguin = decrypt_poesessid(cred.encrypted_pt2gguin) if cred.encrypted_pt2gguin else None
 
-    league = data.get('league', 'S29赛季')
+    league = data.get('league', 'S30赛季')
 
     # 前端传完整 query: 转换格式后使用
     # 否则用旧的简化参数构建 query
@@ -848,7 +901,7 @@ def create_global_monitor():
     poesessid = decrypt_poesessid(cred.encrypted_poesessid)
     pt2gguin = decrypt_poesessid(cred.encrypted_pt2gguin) if cred.encrypted_pt2gguin else None
 
-    league = data.get('league', 'S29赛季')
+    league = data.get('league', 'S30赛季')
     raw_query = data.get('query')
     scan_interval = data.get('scan_interval', 300)
 
@@ -945,27 +998,11 @@ def create_global_monitor():
 
 @api_bp.route('/trade/static', methods=['GET'])
 def trade_static():
-    """代理腾讯 trade data/static 接口 (物品分类/传奇物品)"""
-    try:
-        resp = requests.get(
-            'https://poe.game.qq.com/api/trade/data/static',
-            headers={'User-Agent': 'Mozilla/5.0'},
-            timeout=30
-        )
-        return jsonify(resp.json()), resp.status_code
-    except Exception as e:
-        return jsonify({'msg': f'get static failed: {str(e)}'}), 500
+    """代理腾讯 trade data/static 接口 (物品分类/传奇物品)，带缓存"""
+    return _cached_trade_response('static.json', 'https://poe.game.qq.com/api/trade/data/static', 'static')
 
 
 @api_bp.route('/trade/stats', methods=['GET'])
 def trade_stats():
-    """代理腾讯 trade data/stats 接口 (词缀筛选配置)"""
-    try:
-        resp = requests.get(
-            'https://poe.game.qq.com/api/trade/data/stats',
-            headers={'User-Agent': 'Mozilla/5.0'},
-            timeout=30
-        )
-        return jsonify(resp.json()), resp.status_code
-    except Exception as e:
-        return jsonify({'msg': f'get stats failed: {str(e)}'}), 500
+    """代理腾讯 trade data/stats 接口 (词缀筛选配置)，带缓存"""
+    return _cached_trade_response('stats.json', 'https://poe.game.qq.com/api/trade/data/stats', 'stats')
