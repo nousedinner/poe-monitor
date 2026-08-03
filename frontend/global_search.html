@@ -19,13 +19,13 @@
   </div>
   <div class="header-right">
     <div id="userArea" class="user-area"></div>
-    <select id="league"><option>S29赛季</option><option>永久</option></select>
+    <select id="league"><option>S30赛季</option><option>永久</option></select>
   </div>
 </div>
 <div id="mainContent" style="display:none">
 <div class="sp">
   <div class="search-row">
-    <div class="sw"><input type="text" id="si0" placeholder="查找物品..." autocomplete="off" oninput="onAC()" onkeydown="onACK(event)" onblur="clrAC()"><div class="al" id="al0"></div></div>
+    <div class="sw"><input type="text" id="si0" placeholder="查找物品..." autocomplete="new-password" oninput="onAC()" onkeydown="onACK(event)" onblur="clrAC()"><div class="al" id="al0"></div></div>
     <button class="bs" onclick="doS()">搜索</button>
     <button class="bm" onclick="addMonitor()">添加到监控</button>
     <button class="bc" onclick="clr()">清除</button>
@@ -184,7 +184,7 @@ function doAC(){
     if((e.text&&e.text.toLowerCase().includes(q))||(e.type&&e.type.toLowerCase().includes(q)))m.push({text:e.text||e.type,type:e.type||'',cat:c.label||c.id})
   })});
   if(!m.length){al.classList.remove('show');al.innerHTML='';return}
-  al.innerHTML=m.map(function(x,i){return '<div class="ai'+(i===0?' hl':'')+'" onclick="selAC(this)" data-t="'+esc(x.text)+'">'+esc(x.text)+'<span class="ac">'+esc(x.cat)+'</span></div>'}).join('');
+  al.innerHTML=m.map(function(x,i){return '<div class="ai'+(i===0?' hl':'')+'" onclick="selAC(this)" data-t="'+esc(x.text)+'"><span class="ai-name">'+esc(x.text)+'</span><span class="ac">'+esc(x.cat)+'</span></div>'}).join('');
   al.classList.add('show');AI=0;
 }
 function onACK(e){var items=document.getElementById('al0').querySelectorAll('.ai');if(!items.length)return;
@@ -221,7 +221,7 @@ function setSG(n,type){
 function getSG(n){var on=document.querySelector('#sgt-'+n+' .sb.on');return on?on.dataset.t:'and'}
 function addST(gn){
   var c=document.getElementById('sgc-'+gn),n=TN++,d=document.createElement('div');d.className='sr2';d.id='str-'+n;d.dataset.gn=gn;
-  d.innerHTML='<div class="sw2"><input class="si" id="sti-'+n+'" placeholder="输入词缀名搜索..." autocomplete="off" oninput="onSI('+n+')" onkeydown="onSK(event,'+n+')" onfocus="onSI('+n+')" onblur="clrST('+n+')"><div class="sd" id="sdd-'+n+'"></div></div><input class="sv wt-input" type="number" placeholder="权重" id="stw-'+n+'" style="display:none"><input class="sv" type="number" placeholder="min" id="stn-'+n+'"><span class="sep">—</span><input class="sv" type="number" placeholder="max" id="stx-'+n+'"><button class="sr3" onclick="document.getElementById(\'str-'+n+'\').remove()">✕</button><input type="hidden" id="stv-'+n+'" value="">';
+  d.innerHTML='<div class="sw2"><input class="si" id="sti-'+n+'" placeholder="输入词缀名搜索..." autocomplete="new-password" oninput="onSI('+n+')" onkeydown="onSK(event,'+n+')" onfocus="onSI('+n+')" onblur="clrST('+n+')"><div class="sd" id="sdd-'+n+'"></div></div><input class="sv wt-input" type="number" placeholder="权重" id="stw-'+n+'" style="display:none"><input class="sv" type="number" placeholder="min" id="stn-'+n+'"><span class="sep">—</span><input class="sv" type="number" placeholder="max" id="stx-'+n+'"><button class="sr3" onclick="document.getElementById(\'str-'+n+'\').remove()">✕</button><input type="hidden" id="stv-'+n+'" value="">';
   c.appendChild(d);
   // 如果当前组已是weight模式，显示权重框
   var mode=getSG(gn);if(mode==='weight'||mode==='weight2')d.querySelector('.wt-input').style.display='inline-block';
@@ -371,7 +371,7 @@ function renR(items,total){
     ['explicitMods','implicitMods','fracturedMods','craftedMods','enchantMods','mutatedMods','veiledMods'].forEach(function(key){
       if(item[key]&&Array.isArray(item[key]))allMods=allMods.concat(item[key]);
     });
-    var mods=allMods.map(function(m){return '<div>'+((typeof m==='string')?m:(m.text||''))+'</div>'}).join('');
+    var mods=allMods.map(function(m){return '<div>'+((typeof m==='string')?m:(m.description||m.text||''))+'</div>'}).join('');
     var stats='';if(item.extended){var p=[];if(item.extended.dps)p.push('DPS '+item.extended.dps);if(item.extended.pdps)p.push('物理 '+item.extended.pdps);if(item.extended.ar)p.push('护甲 '+item.extended.ar);if(item.extended.es)p.push('ES '+item.extended.es);if(p.length)stats='<div class="is">'+p.join(' · ')+'</div>'}
     var ph=price.amount?'<div class="ip"><div class="a">'+price.amount+'</div><div class="c">'+(cn[price.currency]||price.currency)+'</div></div>':'<div class="ip"><div class="c">无价格</div></div>';
     return '<div class="ic"><img src="'+(item.icon||'')+'" onerror="this.style.display=\'none\'"><div class="ii"><div class="in '+r+'">'+esc(item.name||'')+'</div><div class="it">'+esc(item.typeLine||'')+'</div><div class="im">'+mods+'</div>'+stats+'</div>'+ph+'</div>'
@@ -1103,11 +1103,11 @@ document.addEventListener('DOMContentLoaded',init);
     </div>
     <div class="form-group">
       <label>用户名</label>
-      <input id="loginUsername" type="text" placeholder="用户名">
+      <input id="loginUsername" type="text" placeholder="用户名" autocomplete="username">
     </div>
     <div class="form-group">
       <label>密码</label>
-      <input id="loginPassword" type="password" placeholder="密码">
+      <input id="loginPassword" type="password" placeholder="密码" autocomplete="current-password">
     </div>
     <button onclick="doLogin()" class="btn-login">登录</button>
   </div>

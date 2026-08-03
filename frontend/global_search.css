@@ -301,3 +301,14 @@ body{background:linear-gradient(145deg,rgba(255,249,240,0.3),rgba(255,240,231,0.
 .mc-head .mc-meta{pointer-events:auto}
 .mc-head .mc-btns{pointer-events:auto}
 .mc-ghost{opacity:0.4;background:rgba(0,224,255,0.1) !important;border:1px dashed var(--primary-color) !important}
+
+/* 移动端适配（2026-08-03）：搜索行两行布局 + 下拉物品名单行省略 */
+@media (max-width: 768px) {
+  .search-row{flex-wrap:wrap;gap:10px}
+  .sw{flex:1 1 100%}
+  .bs,.bm,.bc{flex:1;padding:12px 6px;font-size:15px;text-align:center}
+  .al{max-height:50vh}
+  .ai{display:flex;align-items:center;gap:8px}
+  .ai-name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ac{flex-shrink:0}
+}
