@@ -843,7 +843,13 @@
                 const all = [];
                 ['explicit_mods','implicit_mods','fractured_mods','crafted_mods',
                  'enchant_mods','mutated_mods','veiled_mods'].forEach(k => {
-                    if (item[k] && Array.isArray(item[k])) all.push(...item[k]);
+                    if (item[k] && Array.isArray(item[k])) {
+                        item[k].forEach(m => {
+                            if (typeof m === 'string') all.push(m);
+                            else if (m && m.description) all.push(m.description);
+                            else if (m && m.text) all.push(m.text);
+                        });
+                    }
                 });
                 return all;
             }

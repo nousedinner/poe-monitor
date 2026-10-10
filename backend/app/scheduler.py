@@ -81,6 +81,8 @@ class MonitorScheduler:
                     mods.append(f"{name}: {value_str}")
         if 'builtInSupport' in item_info and item_info['builtInSupport']:
             mods.append(f"内置辅助: {item_info['builtInSupport']}")
+        # 防护：API 词缀字段可能返回 dict 而非 string，优先取 description，其次 text
+        mods = [m.get('description', m.get('text', str(m))) if isinstance(m, dict) else m for m in mods]
         return mods
     
     def _compute_fingerprint_hash(self, item_info):

@@ -2,6 +2,17 @@
 
 本文件记录每次改动的摘要（日期倒序）。详细技术档案见对应 commit 或仓库内专题文档。
 
+## 2026-10-10
+
+### 修复（线上已有、本次补交进仓库）
+- 后端 `scheduler.py`：API 词缀字段可能返回 dict，优先取 `description` 其次 `text`，避免类型错误
+- 前端 `index.html` 搜索：数组元素兼容 dict，取 `description||text`，与后端同一防护
+- 全局搜索 `global_search.html`：修复文本过滤框（input 类型 `in`）既未收集也未提交的问题
+
+### 工程
+- 补交 `models.py` 默认赛季 S29→S30（2026-08-03 CHANGELOG 记为"已纳入提交"，实际未推，本次更正）
+- 本次为线上→仓库单向同步，仓库追平生产；核对方法见 poe-monitor 技能 `references/version-check.md`
+
 ## 2026-08-03
 
 ### 新增

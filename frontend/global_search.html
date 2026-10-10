@@ -157,7 +157,7 @@ function rf(f,gid){
     h+='<span class="sep">min</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mn">';
     if(f.minMax)h+='<span class="sep">max</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mx">';
   }else if(f.input){
-    h+='<input type="text" placeholder="'+(f.input.placeholder||'输入...')+'" data-g="'+gid+'" data-f="'+f.id+'" data-t="op" style="flex:1;background:#0b0b14;border:1px solid #333;color:#ddd;padding:4px 6px;font-size:11px;border-radius:2px">';
+    h+='<input type="text" placeholder="'+(f.input.placeholder||'输入...')+'" data-g="'+gid+'" data-f="'+f.id+'" data-t="in" style="flex:1;background:#0b0b14;border:1px solid #333;color:#ddd;padding:4px 6px;font-size:11px;border-radius:2px">';
   }else if(f.option){
     if(f.option.options&&f.option.options.length>0){
       h+='<select data-g="'+gid+'" data-f="'+f.id+'" data-t="op">';
@@ -305,11 +305,12 @@ function bQ(){
     var g=el.dataset.g,fi=el.dataset.f,t=el.dataset.t;
     if(!f[g])f[g]={};if(!f[g][fi])f[g][fi]={};
     if(t==='op'){if(el.value!=='')f[g][fi]={option:el.value}}
+    else if(t==='in'){if(el.value!=='')f[g][fi]={input:el.value}}
     else if(t==='mn'){if(el.value!==''){if(!f[g][fi].value)f[g][fi].value={};f[g][fi].value.min=parseFloat(el.value)}}
     else if(t==='mx'){if(el.value!==''){if(!f[g][fi].value)f[g][fi].value={};f[g][fi].value.max=parseFloat(el.value)}}
     else if(t==='sk'){var c=el.dataset.c;if(el.value!==''){if(!f[g][fi].value)f[g][fi].value={};f[g][fi].value[c]=parseInt(el.value)}}
   });
-  var filters={};Object.keys(f).forEach(function(g){var ff={};Object.keys(f[g]).forEach(function(fi){var v=f[g][fi];if(v.option!==undefined&&v.option!=='')ff[fi]=v;else if(v.value&&Object.keys(v.value).length)ff[fi]=v.value});if(Object.keys(ff).length)filters[g]={filters:ff}});
+  var filters={};Object.keys(f).forEach(function(g){var ff={};Object.keys(f[g]).forEach(function(fi){var v=f[g][fi];if(v.option!==undefined&&v.option!=='')ff[fi]=v;else if(v.input!==undefined&&v.input!=='')ff[fi]=v;else if(v.value&&Object.keys(v.value).length)ff[fi]=v.value});if(Object.keys(ff).length)filters[g]={filters:ff}});
   if(Object.keys(filters).length)q.filters=filters;
   var stats=[];document.querySelectorAll('.sg').forEach(function(sg){
     var n=sg.id.replace('sgw-',''),type=getSG(n),sfs=[];

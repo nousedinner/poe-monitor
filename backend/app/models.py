@@ -24,7 +24,7 @@ class MonitorTarget(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     poe_account_name = db.Column(db.String(100), nullable=True)  # 全服监控时为 NULL
-    league = db.Column(db.String(50), nullable=False, default='S29赛季')
+    league = db.Column(db.String(50), nullable=False, default='S30赛季')
     scan_interval = db.Column(db.Integer, default=120)
     min_price = db.Column(db.Integer, nullable=True)
     enabled = db.Column(db.Boolean, default=True)  # 新增
