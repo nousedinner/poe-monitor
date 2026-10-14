@@ -1,55 +1,81 @@
-version: '3.8'
+x-app: &app
+  image: poe-monitor:local
+  build: .
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    DATABASE_URL: ${DATABASE_URL:?Use python manage.py init-env}
+    SECRET_KEY: ${SECRET_KEY:?Required}
+    JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Required}
+    POESESSID_ENCRYPTION_KEY: ${POESESSID_ENCRYPTION_KEY:?Required}
+    API_BIND: 0.0.0.0
+    TZ: Asia/Shanghai
+    TRUST_PROXY_COUNT: 1
+  read_only: true
+  tmpfs: ['/tmp:size=64m,mode=1777']
+  networks: [poe-net]
+  mem_limit: 256m
+  cpus: 1.0
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
 
 services:
   mysql:
     image: mysql:8.0
-    container_name: poe-mysql
-    restart: always
+    restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-poe_root_2024}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Required}
       MYSQL_DATABASE: poe_monitor
       MYSQL_USER: poe
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-poe_pass_2024}
-    ports:
-      - "3307:3306"    # 映射到 3307 避免与本地 MySQL 冲突
-    volumes:
-      - mysql_data:/var/lib/mysql
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Required}
+    volumes: [mysql_data:/var/lib/mysql]
+    networks: [poe-net]
+    command: --local-infile=0
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-poe_root_2024}"]
-      interval: 10s
+      test: [CMD-SHELL, 'MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -uroot --silent']
+      interval: 5s
       timeout: 5s
-      retries: 5
-      start_period: 30s
-    command: --local-infile=1
-    networks:
-      - poe-net
+      retries: 30
+    logging:
+      options: {max-size: 10m, max-file: '3'}
+
+  migrate:
+    <<: *app
+    restart: 'no'
+    command: [python, manage.py, upgrade]
+    depends_on:
+      mysql: {condition: service_healthy}
 
   poe:
-    build: .
-    container_name: poe-monitor
-    restart: always
-    ports:
-      - "5000:5000"
-    environment:
-      - DATABASE_URL=mysql+pymysql://poe:${MYSQL_PASSWORD:-poe_pass_2024}@mysql:3306/poe_monitor?charset=utf8mb4
-      - SECRET_KEY=${SECRET_KEY}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-      - POESESSID_ENCRYPTION_KEY=${POESESSID_ENCRYPTION_KEY}
-      - TZ=Asia/Shanghai
-    env_file:
-      - .env
-    volumes:
-      - poe_logs:/var/log/poe-monitor
+    <<: *app
+    command: [python, main.py]
+    ports: ['127.0.0.1:5000:5000']
     depends_on:
-      mysql:
-        condition: service_healthy
-    networks:
-      - poe-net
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/readyz',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    <<: *app
+    command: [python, worker.py]
+    stop_grace_period: 45s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, manage.py, worker-health]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
   mysql_data:
-  poe_logs:
 
 networks:
   poe-net:
-    driver: bridge

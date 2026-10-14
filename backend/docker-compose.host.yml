@@ -1,0 +1,53 @@
+# Existing VPS/shared MySQL on 127.0.0.1:3306. Preserve its original .env.
+# This file intentionally does not create, stop, or replace a MySQL service.
+x-app: &app
+  image: poe-monitor:local
+  build: .
+  restart: unless-stopped
+  network_mode: host
+  env_file: .env
+  environment:
+    DATABASE_URL: ${DATABASE_URL:?Keep the existing database URL}
+    SECRET_KEY: ${SECRET_KEY:?Keep the existing key}
+    JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Keep the existing key}
+    POESESSID_ENCRYPTION_KEY: ${POESESSID_ENCRYPTION_KEY:?Keep the existing key}
+    API_BIND: 127.0.0.1
+    TRUST_PROXY_COUNT: 1
+    TZ: Asia/Shanghai
+  read_only: true
+  tmpfs: ['/tmp:size=64m,mode=1777']
+  mem_limit: 256m
+  cpus: 1.0
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
+
+services:
+  migrate:
+    <<: *app
+    restart: 'no'
+    command: [python, manage.py, upgrade]
+  poe:
+    <<: *app
+    command: [python, main.py]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/readyz',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+  worker:
+    <<: *app
+    command: [python, worker.py]
+    stop_grace_period: 45s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, manage.py, worker-health]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

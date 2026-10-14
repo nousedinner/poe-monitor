@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>POE 市集监控</title>
     <link rel="stylesheet" href="style.css?v=2026041602">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+    <script src="vendor/vue.global.prod.js"></script>
+    <script src="vendor/Sortable.min.js"></script>
+    <script src="ui_helpers.js"></script>
     <link rel="icon" type="image/png" href="/favicon.png">
 </head>
 <body>
@@ -75,7 +76,7 @@
                             <span v-if="t.today_chaos"> <span class="stat-value">{{ t.today_chaos }}</span> 混沌石</span>
                         </div>
                         <div>
-                            在售总价: 
+                            在售总价:
                             <span v-if="t.current_mirror"><span class="stat-value">{{ t.current_mirror }}</span> 镜</span>
                             <span v-if="t.current_divine"><span class="stat-value">{{ t.current_divine }}</span> 神圣石</span>
                             <span v-if="t.current_chaos"><span class="stat-value">{{ t.current_chaos }}</span> 混沌石</span>
@@ -158,9 +159,9 @@
                                 词缀：{{ getAllMods(item).join('； ') }}
                             </div>
                             <div style="margin-top: 4px;">
-                                价格: 
+                                价格:
                                 <span v-if="item.event_type === 'price_change'">
-                                    {{ item.price_old }} → {{ item.price }}
+                                    {{ item.price_old }} {{ item.price_currency_old || item.price_currency }} → {{ item.price }}
                                     <span v-if="item.price_currency === 'mirror'"> 镜</span>
                                     <span v-else-if="item.price_currency === 'chaos'"> 混沌石</span>
                                     <span v-else> 神圣石</span>
@@ -191,9 +192,9 @@
                                         词缀：{{ getAllMods(r).join('； ') }}
                                     </div>
                                     <div style="margin-top: 4px;">
-                                        价格: 
+                                        价格:
                                         <span v-if="r.event_type === 'price_change'">
-                                            {{ r.price_old }} → {{ r.price }}
+                                            {{ r.price_old }} {{ r.price_currency_old || r.price_currency }} → {{ r.price }}
                                             <span v-if="r.price_currency === 'mirror'"> 镜</span>
                                             <span v-else-if="r.price_currency === 'chaos'"> 混沌石</span>
                                             <span v-else> 神圣石</span>
@@ -333,85 +334,19 @@
             };
 
             const apiRequest = async (url, method = 'GET', body = null) => {
+                const requestToken = token.value;
                 const headers = { 'Content-Type': 'application/json' };
                 if (token.value) headers['Authorization'] = `Bearer ${token.value}`;
                 const options = { method, headers };
                 if (body) options.body = JSON.stringify(body);
                 const res = await fetch(`${BASE_URL}${url}`, options);
+                if (requestToken && requestToken !== token.value) throw new Error('登录状态已变化');
                 if (!res.ok) {
                     const err = await res.json();
                     throw new Error(err.msg || '请求失败');
                 }
                 return res.json();
             };
-
-            // 找出冗余事件ID列表（前端分组）
-            const findRedundantIds = (eventsList) => {
-                const normalEvents = eventsList.filter(e => !e.is_gem && (e.event_type === 'listed' || e.event_type === 'sold'));
-                const groups = {};
-                for (const ev of normalEvents) {
-                    // 跳过全服监控事件（仅清理账号监控）
-                    if (ev.target_type === 'global') continue;
-                    const fingerprint = `${ev.item_name}|${ev.base_type}|${JSON.stringify(ev.explicit_mods)}`;
-                    if (!groups[fingerprint]) groups[fingerprint] = [];
-                    groups[fingerprint].push(ev);
-                }
-                const redundantIds = [];
-                for (const fingerprint in groups) {
-                    const group = groups[fingerprint];
-                    if (group.length < 2) continue;
-                    group.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-                    let firstListed = null;
-                    let lastSold = null;
-                    for (const ev of group) {
-                        if (ev.event_type === 'listed' && !firstListed) firstListed = ev;
-                        if (ev.event_type === 'sold') lastSold = ev;
-                    }
-                    for (const ev of group) {
-                        if (ev === firstListed || ev === lastSold) continue;
-                        redundantIds.push(ev.id);
-                    }
-                }
-                return redundantIds;
-            };
-
-            // 标记冗余
-            const markRedundant = async (eventIds) => {
-                if (eventIds.length === 0) return;
-                try {
-                    await apiRequest('/api/events/mark_redundant', 'POST', { event_ids: eventIds });
-                    console.log(`标记了 ${eventIds.length} 条冗余事件`);
-                } catch (e) {
-                    console.error('标记冗余失败', e);
-                }
-            };
-
-            // 全量清理
-            const fullClean = async () => {
-                const url = `/api/events/all?is_redundant=0&is_gem=0&limit=10000`;
-                try {
-                    const data = await apiRequest(url);
-                    const redundantIds = findRedundantIds(data.events);
-                    await markRedundant(redundantIds);
-                } catch (e) {
-                    console.error('全量清理失败', e);
-                }
-            };
-
-            // 增量清理（最近24小时）
-            const incrementalClean = async () => {
-                const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-                const url = `/api/events/all?is_redundant=0&is_gem=0&since=${since}&limit=10000`;
-                try {
-                    const data = await apiRequest(url);
-                    const redundantIds = findRedundantIds(data.events);
-                    await markRedundant(redundantIds);
-                } catch (e) {
-                    console.error('增量清理失败', e);
-                }
-            };
-
-            let cleanInterval = null;
 
             const login = async () => {
                 try {
@@ -423,11 +358,6 @@
                     await loadTargets();
                     await loadCredentials();
                     await fetchLogs();
-                    await fullClean();
-                    if (cleanInterval) clearInterval(cleanInterval);
-                    cleanInterval = setInterval(() => {
-                        if (token.value) incrementalClean();
-                    }, 5 * 60 * 1000);
                     // 启动自动刷新（每 8 分钟）
                     if (refreshInterval) clearInterval(refreshInterval);
                     refreshInterval = setInterval(() => {
@@ -439,13 +369,15 @@
                 }
             };
 
-            const logout = () => {
+            const logout = async () => {
+                try { await apiRequest('/auth/logout', 'POST', {}); } catch (_) {}
+                events.value = []; displayEvents.value = []; selectedTargetId.value = null; cookieString.value = '';
+                allEventsFiltered = []; allEventsCurrentOffset = 0; eventHasMore.value = false; logs.value = [];
                 token.value = null;
                 localStorage.removeItem('token');
                 localStorage.removeItem('username');
                 targets.value = [];
                 username.value = '';
-                if (cleanInterval) clearInterval(cleanInterval);
                 if (refreshInterval) clearInterval(refreshInterval);
                 if (sortableInstance) sortableInstance.destroy();
                 sortableInstance = null;
@@ -525,7 +457,7 @@
                     const body = {
                         poe_account_name: newTarget.value.account,
                         scan_interval: parseInt(newTarget.value.interval),
-                        min_price: newTarget.value.minPrice ? parseInt(newTarget.value.minPrice) : null
+                        min_price: newTarget.value.minPrice === '' || newTarget.value.minPrice == null ? null : Number(newTarget.value.minPrice)
                     };
                     await apiRequest('/api/targets', 'POST', body);
                     await loadTargets();
@@ -540,7 +472,7 @@
                 try {
                     const body = {
                         scan_interval: parseInt(target.editInterval),
-                        min_price: target.editMinPrice ? parseInt(target.editMinPrice) : null
+                        min_price: target.editMinPrice === '' || target.editMinPrice == null ? null : Number(target.editMinPrice)
                     };
                     await apiRequest(`/api/targets/${target.id}`, 'PUT', body);
                     await loadTargets();
@@ -708,7 +640,7 @@
                 for (const ev of normalEvents) {
                     // 跳过全服监控事件（仅清理账号监控）
                     if (ev.target_type === 'global') continue;
-                    const fingerprint = `${ev.item_name}|${ev.base_type}|${JSON.stringify(ev.explicit_mods)}`;
+                    const fingerprint = PoeUI.eventKey(ev);
                     if (!groups[fingerprint]) groups[fingerprint] = [];
                     groups[fingerprint].push(ev);
                 }
@@ -763,7 +695,7 @@
                             fingerprint: `gem_${ev.id}`
                         });
                     } else {
-                        const fingerprint = `${ev.item_name}|${ev.base_type}|${JSON.stringify(ev.explicit_mods)}`;
+                        const fingerprint = PoeUI.eventKey(ev);
                         const redundant = redundantMap[fingerprint];
                         newDisplay.push({
                             ...ev,
@@ -827,17 +759,26 @@
                     loadTargets();
                     loadCredentials();
                     fetchLogs();
-                    fullClean();
-                    if (cleanInterval) clearInterval(cleanInterval);
-                    cleanInterval = setInterval(() => {
-                        if (token.value) incrementalClean();
-                    }, 5 * 60 * 1000);
                     if (refreshInterval) clearInterval(refreshInterval);
                     refreshInterval = setInterval(() => {
                         if (token.value) loadTargets();
                     }, 8 * 60 * 1000);
                 });
             }
+
+            window.addEventListener('storage', async (event) => {
+                if (event.key !== 'token' || token.value === event.newValue) return;
+                token.value = event.newValue;
+                targets.value = []; events.value = []; displayEvents.value = [];
+                allEventsFiltered = []; allEventsCurrentOffset = 0; eventHasMore.value = false;
+                logs.value = []; cookieString.value = ''; selectedTargetId.value = null;
+                username.value = '';
+                if (refreshInterval) clearInterval(refreshInterval);
+                if (token.value) {
+                    await fetchUserInfo(); await loadTargets(); await loadCredentials();
+                    refreshInterval = setInterval(() => { if (token.value) loadTargets(); }, 8 * 60 * 1000);
+                }
+            });
 
             function getAllMods(item) {
                 const all = [];

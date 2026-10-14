@@ -8,7 +8,8 @@
 <link rel="stylesheet" href="trade.css">
 <link rel="stylesheet" href="chunk.css">
 <link rel="stylesheet" href="global_search.css">
-<script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+<script src="vendor/Sortable.min.js"></script>
+<script src="ui_helpers.js"></script>
 </head>
 <body>
 <div id="app">
@@ -59,6 +60,7 @@ var isAdmin=false; // 管理员标志
 var trendCache={};  // {targetId: {data: {1d: [...], 7d: [...]}, lastUpdate: 'ISO时间'}}
 var trendTimers={}; // {targetId: intervalId} 用于后台更新
 function showToast(msg,duration){
+  msg=String(msg==null?'':msg);
   hideToast();
   var toast=document.createElement('div');
   // 根据消息内容判断类型
@@ -68,7 +70,7 @@ function showToast(msg,duration){
   else if(msg.indexOf('❌')>=0||msg.indexOf('失败')>=0||msg.indexOf('错误')>=0)type='error';
   toast.className='search-toast '+type;
   toast.id='searchToast';
-  toast.innerHTML=msg;
+  toast.textContent=msg;
   document.body.appendChild(toast);
   if(duration)toastTimer=setTimeout(hideToast,duration);
 }
@@ -94,7 +96,7 @@ async function init(){
   document.addEventListener('focusin',function(e){if(e.target.classList.contains('si')){document.querySelectorAll('.fg').forEach(function(f){f.classList.add('no-hover')})}});
   document.addEventListener('focusout',function(e){if(e.target.classList.contains('si')){setTimeout(function(){if(!document.querySelector('.sd.show')){document.querySelectorAll('.fg').forEach(function(f){f.classList.remove('no-hover')})}},200)}});
   window.addEventListener('scroll',updateScrollBtns);
-  
+
   // 并行加载数据 + 监控目标
   try{
     var loadFilters=function(){return fetch('filters.json').then(function(r){return r.json()}).catch(function(){return fetch(API+'/trade/filters').then(function(r){return r.json()})})};
@@ -112,7 +114,7 @@ async function init(){
       AM.push(entry);
     })});
     buildUI();
-  }catch(e){document.getElementById('fg').innerHTML='<div class="em">加载筛选器失败: '+e.message+'</div>';showToast('❌ 页面初始化失败，请刷新重试',5000)}
+  }catch(e){document.getElementById('fg').innerHTML='<div class="em">加载筛选器失败: '+esc(e.message)+'</div>';showToast('❌ 页面初始化失败，请刷新重试',5000)}
 }
 // 滚动功能
 function scrollToTop(){window.scrollTo({top:0,behavior:'smooth'})}
@@ -131,7 +133,7 @@ function buildUI(){
   order.forEach(function(id){
     var gr=fm[id];if(!gr)return;
     var fw=id==='misc_filters'?' fw':'';
-    h+='<div class="fg'+fw+'"><div class="fh" onclick="tog(this)"><span>'+gr.title+'</span><span style="color:#888;font-size:10px">▶</span></div><div class="fb hide">';
+    h+='<div class="fg'+fw+'"><div class="fh" onclick="tog(this)"><span>'+esc(gr.title)+'</span><span style="color:#888;font-size:10px">▶</span></div><div class="fb hide">';
     gr.filters.forEach(function(f){h+=rf(f,gr.id)});
     h+='</div></div>';
   });
@@ -139,38 +141,38 @@ function buildUI(){
   document.getElementById('sa').innerHTML='<div class="fg" style="flex:1 1 100%;overflow:visible !important"><div class="fh" onclick="tog(this)"><span>词缀筛选</span><span style="color:#888;font-size:10px">▶</span></div><div class="fb hide"><div id="sgl"></div><button class="ag" onclick="addSG()">+ 增加状态组</button></div></div>';
 }
 function rf(f,gid){
-  var h='<div class="fr"><label>'+(f.text||f.id)+'</label>';
+  var h='<div class="fr"><label>'+esc(f.text||f.id)+'</label>';
   if(f.sockets){
     h+='<div class="sr">';
-    ['r','g','b','w'].forEach(function(c){h+='<input type="number" min="0" max="6" class="s-'+c+'" placeholder="'+c.toUpperCase()+'" data-g="'+gid+'" data-f="'+f.id+'" data-t="sk" data-c="'+c+'">'});
-    h+='<span class="sep">min</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mn">';
-    h+='<span class="sep">max</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mx">';
+    ['r','g','b','w'].forEach(function(c){h+='<input type="number" min="0" max="6" class="s-'+c+'" placeholder="'+c.toUpperCase()+'" data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="sk" data-c="'+c+'">'});
+    h+='<span class="sep">min</span><input type="number" data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="mn">';
+    h+='<span class="sep">max</span><input type="number" data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="mx">';
     h+='</div>';
   }else if(f.option&&(f.minMax||f.minOnly)){
     if(f.option.options&&f.option.options.length>0){
-      h+='<select data-g="'+gid+'" data-f="'+f.id+'" data-t="op">';
-      f.option.options.forEach(function(o){h+='<option value="'+(o.id!=null?o.id:'')+'">'+o.text+'</option>'});
+      h+='<select data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="op">';
+      f.option.options.forEach(function(o){h+='<option value="'+esc(o.id!=null?o.id:'')+'">'+esc(o.text)+'</option>'});
       h+='</select>';
     }else{
-      h+='<input type="text" placeholder="输入..." data-g="'+gid+'" data-f="'+f.id+'" data-t="op" style="flex:1;max-width:150px;background:#0a0a0a;border:1px solid #444;color:#ddd;padding:2px 4px;font-size:11px">';
+      h+='<input type="text" placeholder="输入..." data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="op" style="flex:1;max-width:150px;background:#0a0a0a;border:1px solid #444;color:#ddd;padding:2px 4px;font-size:11px">';
     }
-    h+='<span class="sep">min</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mn">';
-    if(f.minMax)h+='<span class="sep">max</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mx">';
+    h+='<span class="sep">min</span><input type="number" data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="mn">';
+    if(f.minMax)h+='<span class="sep">max</span><input type="number" data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="mx">';
   }else if(f.input){
-    h+='<input type="text" placeholder="'+(f.input.placeholder||'输入...')+'" data-g="'+gid+'" data-f="'+f.id+'" data-t="in" style="flex:1;background:#0b0b14;border:1px solid #333;color:#ddd;padding:4px 6px;font-size:11px;border-radius:2px">';
+    h+='<input type="text" placeholder="'+esc(f.input.placeholder||'输入...')+'" data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="in" style="flex:1;background:#0b0b14;border:1px solid #333;color:#ddd;padding:4px 6px;font-size:11px;border-radius:2px">';
   }else if(f.option){
     if(f.option.options&&f.option.options.length>0){
-      h+='<select data-g="'+gid+'" data-f="'+f.id+'" data-t="op">';
-      f.option.options.forEach(function(o){h+='<option value="'+(o.id!=null?o.id:'')+'">'+o.text+'</option>'});
+      h+='<select data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="op">';
+      f.option.options.forEach(function(o){h+='<option value="'+esc(o.id!=null?o.id:'')+'">'+esc(o.text)+'</option>'});
       h+='</select>';
     }else{
-      h+='<input type="text" placeholder="输入..." data-g="'+gid+'" data-f="'+f.id+'" data-t="op" style="flex:1;background:#0a0a0a;border:1px solid #444;color:#ddd;padding:2px 4px;font-size:11px">';
+      h+='<input type="text" placeholder="输入..." data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="op" style="flex:1;background:#0a0a0a;border:1px solid #444;color:#ddd;padding:2px 4px;font-size:11px">';
     }
   }else if(f.minMax){
-    h+='<span class="sep">min</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mn">';
-    h+='<span class="sep">max</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mx">';
+    h+='<span class="sep">min</span><input type="number" data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="mn">';
+    h+='<span class="sep">max</span><input type="number" data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="mx">';
   }else if(f.minOnly){
-    h+='<span class="sep">min</span><input type="number" data-g="'+gid+'" data-f="'+f.id+'" data-t="mn">';
+    h+='<span class="sep">min</span><input type="number" data-g="'+esc(gid)+'" data-f="'+esc(f.id)+'" data-t="mn">';
   }
   h+='</div>';return h;
 }
@@ -193,7 +195,7 @@ function onACK(e){var items=document.getElementById('al0').querySelectorAll('.ai
   else if(e.key==='Enter'){e.preventDefault();if(AI>=0&&items[AI])selAC(items[AI]);else doS()}
   else if(e.key==='Escape')document.getElementById('al0').classList.remove('show')}
 function selAC(el){var inp=document.getElementById('si0');inp.value=el.dataset.t;inp.dataset.selected='1';document.getElementById('al0').classList.remove('show')}
-function esc(s){return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')}
+function esc(s){return PoeUI.escapeHTML(s)}
 // 词缀
 function addSG(){
   var c=document.getElementById('sgl'),n=SN++,d=document.createElement('div');d.className='sg';d.id='sgw-'+n;
@@ -229,7 +231,7 @@ function addST(gn){
   setTimeout(function(){var inp=document.getElementById('sti-'+n);if(inp)inp.focus()},50);
 }
 var STs={},SIs={};
-function clrAC(){var inp=document.getElementById('si0');if(!inp.dataset.selected){inp.value=''}delete inp.dataset.selected;}
+function clrAC(){setTimeout(function(){document.getElementById('al0').classList.remove('show')},150)}
 function clrST(n){
   var hid=document.getElementById('stv-'+n);
   if(!hid.value){document.getElementById('sti-'+n).value=''}
@@ -240,7 +242,7 @@ function doSS(n){
   if(q.length<1){drop.classList.remove('show');drop.innerHTML='';return}
   var m=AM.filter(function(x){return x.text.toLowerCase().includes(q)});
   if(!m.length){drop.classList.remove('show');return}
-  drop.innerHTML=m.map(function(x,i){return '<div class="so'+(i===0?' hl':'')+'" data-id="'+x.id+'" data-tp="'+x.type+'" data-tx="'+esc(x.text)+'" onclick="selST('+n+',this)"><span class="st2 tp-'+x.type+'">'+x.type+'</span> '+esc(x.text)+'</div>'}).join('');
+  drop.innerHTML=m.map(function(x,i){return '<div class="so'+(i===0?' hl':'')+'" data-id="'+esc(x.id)+'" data-tp="'+esc(x.type)+'" data-tx="'+esc(x.text)+'" onclick="selST('+n+',this)"><span class="st2 tp-'+esc(x.type)+'">'+esc(x.type)+'</span> '+esc(x.text)+'</div>'}).join('');
   drop.classList.add('show');SIs[n]=0;
 }
 function onSK(e,n){
@@ -257,22 +259,22 @@ function selST(n,el){
   hid.value=el.dataset.id;
   inp.dataset.tp=el.dataset.tp;
   document.getElementById('sdd-'+n).classList.remove('show');
-  
+
   // 查找词缀详情
   var modId=el.dataset.id;
   var modEntry=null;
   AM.forEach(function(a){if(a.id===modId)modEntry=a;});
-  
+
   var minInput=document.getElementById('stn-'+n);
   var maxInput=document.getElementById('stx-'+n);
   var sepSpan=minInput.nextElementSibling; // "—"分隔符
-  
+
   if(modEntry && modEntry.option && modEntry.option.options){
     // 有option → 隐藏min/max，显示select
     minInput.style.display='none';
     maxInput.style.display='none';
     sepSpan.style.display='none';
-    
+
     // 创建或更新select
     var sel=document.getElementById('sts-'+n);
     if(!sel){
@@ -284,7 +286,7 @@ function selST(n,el){
     }
     sel.innerHTML='<option value="">选择...</option>';
     modEntry.option.options.forEach(function(o){
-      sel.innerHTML+='<option value="'+o.id+'">'+o.text+'</option>';
+      sel.innerHTML+='<option value="'+esc(o.id)+'">'+esc(o.text)+'</option>';
     });
     sel.style.display='';
   }else{
@@ -292,7 +294,7 @@ function selST(n,el){
     minInput.style.display='';
     maxInput.style.display='';
     sepSpan.style.display='';
-    
+
     var sel=document.getElementById('sts-'+n);
     if(sel) sel.style.display='none';
   }
@@ -320,7 +322,7 @@ function bQ(){
       var sel=document.getElementById('sts-'+sn);
       if(modId){
         var sf={type:modTp,id:modId,disabled:false};
-        
+
         if(sel && sel.style.display!=='none' && sel.value){
           // option类型
           sf.value={option:parseInt(sel.value)};
@@ -331,7 +333,7 @@ function bQ(){
           if(smax&&smax.value!==''){sv.max=parseFloat(smax.value);ok=true}
           sf.value=ok?sv:{};
         }
-        
+
         var wt=document.getElementById('stw-'+sn);
         if(wt&&wt.value!=='')sf.weight=parseFloat(wt.value);
         sfs.push(sf);
@@ -349,37 +351,36 @@ async function doS(page){
   document.getElementById('res').innerHTML='<div class="ld">搜索中...</div>';
   var h={'Content-Type':'application/json'},token=localStorage.getItem('token');if(token)h['Authorization']='Bearer '+token;
   try{var r=await fetch(API+'/search',{method:'POST',headers:h,body:JSON.stringify({league:league,query:q,page:CP})});
-    var d=await r.json();if(!r.ok){var errMsg=d.msg||'未知错误';if(errMsg.indexOf('POESESSID')>=0){showToast('❌ 请先设置 POESESSID 凭证<br><a href="/" style="color:#fff;text-decoration:underline">前往主页设置</a>',5000)}else{showToast('❌ 搜索失败: '+errMsg,3000)}document.getElementById('res').innerHTML='<div class="em">'+errMsg+'</div>';return}
-    renR(d.items||[],d.total||0);renP(d.total||0);
+    var d=await r.json();if(!r.ok){var errMsg=d.msg||'未知错误';if(errMsg.indexOf('POESESSID')>=0){showToast('❌ 请先设置 POESESSID 凭证，可返回主页设置',5000)}else{showToast('❌ 搜索失败: '+errMsg,3000)}document.getElementById('res').innerHTML='<div class="em">'+esc(errMsg)+'</div>';return}
+    renR(d.items||[],d.total||0);renP(d.accessible_total==null?Math.min(d.total||0,100):d.accessible_total);
     // 显示结果提示
     showToast('✅ 找到 '+(d.total||0)+' 个结果',2000);
-  }catch(e){document.getElementById('res').innerHTML='<div class="em">请求失败: '+e.message+'</div>';hideToast()}
+  }catch(e){document.getElementById('res').innerHTML='<div class="em">请求失败: '+esc(e.message)+'</div>';hideToast()}
 }
 function renR(items,total){
-  document.getElementById('rh').style.display='flex';document.getElementById('rc').textContent='共 '+total+' 个结果';document.getElementById('rp').textContent='第 '+(CP+1)+' 页';
+  document.getElementById('rh').style.display='flex';
+  document.getElementById('rc').textContent='共 '+total+' 个结果';
+  document.getElementById('rp').textContent='第 '+(CP+1)+' 页';
   var res=document.getElementById('res');
-  if(!items.length){
-    res.innerHTML='<div class="zero-result"><div class="icon">🔍</div><div class="title">未找到匹配的物品</div><div class="desc">请检查筛选条件是否正确：<br>• 物品名称/类型是否准确<br>• 价格范围是否合理<br>• 词缀条件是否过于苛刻<br><br>尝试减少筛选条件后重新搜索</div></div>';
-    hideToast();
-    return;
-  }
+  if(!items.length){res.innerHTML='<div class="em">未找到匹配的物品，请调整筛选条件</div>';return}
   var cn={chaos:'混沌石',divine:'神圣石',exalted:'崇高石',mirror:'镜子'};
   res.innerHTML=items.map(function(it){
-    var item=it.item||{},list=it.listing||{},price=list.price||{};
-    var r=item.frameType===3?'unique':item.frameType===2?'rare':item.frameType===1?'magic':'normal';
-    // 合并所有类型的词缀
+    var item=it.item||{},price=(it.listing||{}).price||{};
+    var rarity=item.frameType===3?'unique':item.frameType===2?'rare':item.frameType===1?'magic':'normal';
     var allMods=[];
-    ['explicitMods','implicitMods','fracturedMods','craftedMods','enchantMods','mutatedMods','veiledMods'].forEach(function(key){
-      if(item[key]&&Array.isArray(item[key]))allMods=allMods.concat(item[key]);
-    });
-    var mods=allMods.map(function(m){return '<div>'+((typeof m==='string')?m:(m.description||m.text||''))+'</div>'}).join('');
-    var stats='';if(item.extended){var p=[];if(item.extended.dps)p.push('DPS '+item.extended.dps);if(item.extended.pdps)p.push('物理 '+item.extended.pdps);if(item.extended.ar)p.push('护甲 '+item.extended.ar);if(item.extended.es)p.push('ES '+item.extended.es);if(p.length)stats='<div class="is">'+p.join(' · ')+'</div>'}
-    var ph=price.amount?'<div class="ip"><div class="a">'+price.amount+'</div><div class="c">'+(cn[price.currency]||price.currency)+'</div></div>':'<div class="ip"><div class="c">无价格</div></div>';
-    return '<div class="ic"><img src="'+(item.icon||'')+'" onerror="this.style.display=\'none\'"><div class="ii"><div class="in '+r+'">'+esc(item.name||'')+'</div><div class="it">'+esc(item.typeLine||'')+'</div><div class="im">'+mods+'</div>'+stats+'</div>'+ph+'</div>'
+    ['explicitMods','implicitMods','fracturedMods','craftedMods','enchantMods','mutatedMods','veiledMods'].forEach(function(key){if(Array.isArray(item[key]))allMods=allMods.concat(item[key])});
+    var mods=allMods.map(function(m){return '<div>'+esc(typeof m==='string'?m:(m&&m.description||m&&m.text||''))+'</div>'}).join('');
+    var statistics=[];
+    if(item.extended){[['dps','DPS '],['pdps','物理 '],['ar','护甲 '],['es','ES ']].forEach(function(pair){if(item.extended[pair[0]])statistics.push(pair[1]+esc(item.extended[pair[0]]))})}
+    var stats=statistics.length?'<div class="is">'+statistics.join(' · ')+'</div>':'';
+    var amount=Number(price.amount);
+    var ph=Number.isFinite(amount)?'<div class="ip"><div class="a">'+esc(amount)+'</div><div class="c">'+esc(cn[price.currency]||price.currency)+'</div></div>':'<div class="ip"><div class="c">无价格</div></div>';
+    var icon=item.icon?PoeUI.imageURL(item.icon,location.origin):'';
+    return '<div class="ic">'+(icon?'<img src="'+esc(icon)+'" onerror="this.style.display=\'none\'">':'')+'<div class="ii"><div class="in '+rarity+'">'+esc(item.name)+'</div><div class="it">'+esc(item.typeLine)+'</div><div class="im">'+mods+'</div>'+stats+'</div>'+ph+'</div>';
   }).join('');
 }
 function renP(total){
-  var el=document.getElementById('pg'),tp=Math.ceil(total/20);if(tp<=1){el.innerHTML='';return}
+  var el=document.getElementById('pg'),tp=Math.ceil(Math.min(total,100)/20);if(tp<=1){el.innerHTML='';return}
   var h='';if(CP>0)h+='<button onclick="doS('+(CP-1)+')">上一页</button>';
   for(var i=Math.max(0,CP-2);i<Math.min(tp,CP+3);i++)h+='<button class="'+(i===CP?'on':'')+'" onclick="doS('+i+')">'+(i+1)+'</button>';
   if(CP<tp-1)h+='<button onclick="doS('+(CP+1)+')">下一页</button>';el.innerHTML=h;
@@ -392,8 +393,8 @@ function clr(){
 function fmtQ(qp){
   if(!qp)return '';
   var parts=[];
-  if(qp.name)parts.push('物品: '+qp.name);
-  if(qp.type)parts.push('类型: '+qp.type);
+  if(qp.name)parts.push('物品: '+(typeof qp.name==='object'?qp.name.option:qp.name));
+  if(qp.type)parts.push('类型: '+(typeof qp.type==='object'?qp.type.option:qp.type));
   if(qp.stats)qp.stats.forEach(function(s){s.filters.forEach(function(f){parts.push(f.id.split('.').pop())})});
   return parts.join(' | ') || '自定义筛选';
 }
@@ -402,16 +403,9 @@ function fmtQ(qp){
 function authH(){var t=localStorage.getItem('token');return t?{'Authorization':'Bearer '+t}:{}}
 function fmtT(iso){
   if(!iso)return '';
-  try{
-    var d=new Date(iso);
-    var year=d.getFullYear();
-    var month=String(d.getMonth()+1).padStart(2,'0');
-    var day=String(d.getDate()).padStart(2,'0');
-    var hours=String(d.getHours()).padStart(2,'0');
-    var minutes=String(d.getMinutes()).padStart(2,'0');
-    var seconds=String(d.getSeconds()).padStart(2,'0');
-    return year+'-'+month+'-'+day+' '+hours+':'+minutes+':'+seconds;
-  }catch(e){return iso}
+  if(!/Z$|[+-]\d\d:\d\d$/.test(iso))iso+='Z';
+  var date=new Date(iso);
+  return Number.isFinite(date.getTime())?date.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'';
 }
 
 function addMonitor(){
@@ -457,20 +451,20 @@ function renderCard(data,query,interval){
   var title=query.name&&query.name.option?query.name.option:(query.type||'全服监控');
   var qid=data.query_id||'';
   var league=document.getElementById('league').value;
-  var officialUrl='https://poe.game.qq.com/trade/search/'+encodeURIComponent(league)+'/'+qid;
+  var officialUrl='https://poe.game.qq.com/trade/search/'+encodeURIComponent(league)+'/'+encodeURIComponent(qid);
   div.innerHTML=
     '<div class="mc-head">'+
       '<span class="drag-handle" data-tip="拖拽排序">⋮⋮</span>'+
       '<span class="mc-title">'+esc(title)+'</span>'+
       '<div class="mc-meta">'+
         '<span class="mc-interval" onclick="editInterval('+data.id+','+interval+')" data-tip="修改扫描间隔">'+interval+'s</span>'+
-        '<span class="mc-last-scan">刚刚</span>'+
+        '<span class="mc-last-scan">等待扫描</span>'+
       '</div>'+
       '<div class="mc-btns">'+
         '<button class="mc-toggle on" id="mct-'+data.id+'" onclick="toggleTarget('+data.id+')" data-tip="启用/禁用监控"></button>'+
         '<button class="mc-btn" onclick="triggerScan('+data.id+',this)" id="mcb-trigger-'+data.id+'" data-tip="立即刷新数据">🔄</button>'+
         '<button class="mc-btn" onclick="viewTrend('+data.id+')" data-tip="查看价格趋势">📈</button>'+
-        (qid?'<a class="mc-btn" href="'+esc(officialUrl)+'" target="_blank" data-tip="前往官网查看">🔗</a>':'')+
+        (qid?'<a class="mc-btn" href="'+esc(officialUrl)+'" target="_blank" rel="noopener noreferrer" data-tip="前往官网查看">🔗</a>':'')+
         '<button class="mc-btn danger" onclick="deleteTarget('+data.id+')" data-tip="删除此监控">🗑</button>'+
       '</div>'+
     '</div>'+
@@ -481,7 +475,7 @@ function renderCard(data,query,interval){
     '</div>'+
     '<div class="mc-items" id="mci-'+data.id+'"><div class="mc-empty">加载中...</div></div>'+
     '<div class="mc-foot">'+
-      '<span class="mc-qid">Query: '+qid.substring(0,12)+'…</span>'+
+      '<span class="mc-qid">Query: '+esc(qid.substring(0,12))+'…</span>'+
     '</div>';
   wrap.insertBefore(div,wrap.firstChild);
   initMcSortable();
@@ -498,7 +492,7 @@ function renderCardFromTarget(t){
   var qp=t.query_params||{};
   var title=fmtQ(qp);
   var qid=t.query_id||'';
-  var officialUrl='https://poe.game.qq.com/trade/search/'+encodeURIComponent(t.league)+'/'+qid;
+  var officialUrl='https://poe.game.qq.com/trade/search/'+encodeURIComponent(t.league)+'/'+encodeURIComponent(qid);
   var enabled=t.enabled!==false;
   div.innerHTML=
     '<div class="mc-head">'+
@@ -512,7 +506,7 @@ function renderCardFromTarget(t){
         '<button class="mc-toggle '+(enabled?'on':'off')+'" id="mct-'+t.id+'" onclick="toggleTarget('+t.id+')" data-tip="启用/禁用监控"></button>'+
         '<button class="mc-btn" onclick="triggerScan('+t.id+',this)" id="mcb-trigger-'+t.id+'" data-tip="立即刷新数据">🔄</button>'+
         '<button class="mc-btn" onclick="viewTrend('+t.id+')" data-tip="查看价格趋势">📈</button>'+
-        (qid?'<a class="mc-btn" href="'+esc(officialUrl)+'" target="_blank" data-tip="前往官网查看">🔗</a>':'')+
+        (qid?'<a class="mc-btn" href="'+esc(officialUrl)+'" target="_blank" rel="noopener noreferrer" data-tip="前往官网查看">🔗</a>':'')+
         '<button class="mc-btn danger" onclick="deleteTarget('+t.id+')" data-tip="删除此监控">🗑</button>'+
       '</div>'+
     '</div>'+
@@ -523,7 +517,7 @@ function renderCardFromTarget(t){
     '</div>'+
     '<div class="mc-items" id="mci-'+t.id+'"><div class="mc-empty">加载中...</div></div>'+
     '<div class="mc-foot">'+
-      '<span class="mc-qid">Query: '+qid.substring(0,12)+'…</span>'+
+      '<span class="mc-qid">Query: '+esc(qid.substring(0,12))+'…</span>'+
     '</div>';
   wrap.appendChild(div);
   loadCardData(t.id);
@@ -538,6 +532,7 @@ async function loadCardData(targetId){
       fetch(API+'/targets/'+targetId+'/snapshots?limit=20',{headers:h}),
       fetch(API+'/targets/'+targetId+'/sale_stats?days=1',{headers:h})
     ]);
+    if(!snapRes.ok||!statRes.ok)throw new Error('卡片数据加载失败');
     // 物品列表
     var items=await snapRes.json();
     var el=document.getElementById('mci-'+targetId);
@@ -547,7 +542,7 @@ async function loadCardData(targetId){
     if(items.length>0){
       var divinePrices=items.filter(function(it){return it.price_currency==='divine'}).map(function(it){return it.price});
       if(divinePrices.length>0){
-        top10Avg=Math.round(divinePrices.slice(0,10).reduce(function(a,b){return a+b},0)/Math.min(divinePrices.length,10));
+        top10Avg=Number((divinePrices.slice(0,10).reduce(function(a,b){return a+Number(b)},0)/Math.min(divinePrices.length,10)).toFixed(6));
       }
     }
     // 更新前10均价显示 — 查找卡片内所有.val元素，找到"前10均价"旁边的值
@@ -565,17 +560,9 @@ async function loadCardData(targetId){
     var soldEl=document.getElementById('mc-sold-'+targetId);
     if(listedEl)listedEl.textContent=sd.listed||0;
     if(soldEl)soldEl.textContent=sd.sold||0;
-    // 更新扫描时间为具体时间
     var scanEl=card?card.querySelector('.mc-last-scan'):null;
-    if(scanEl){
-      var now=new Date();
-      scanEl.textContent=now.getFullYear()+'-'+
-        String(now.getMonth()+1).padStart(2,'0')+'-'+
-        String(now.getDate()).padStart(2,'0')+' '+
-        String(now.getHours()).padStart(2,'0')+':'+
-        String(now.getMinutes()).padStart(2,'0')+':'+
-        String(now.getSeconds()).padStart(2,'0');
-    }
+    var scanned=snapRes.headers.get('X-Last-Scan');
+    if(scanEl&&scanned)scanEl.textContent=fmtT(scanned);
     // 缓存趋势数据（点击时用）
     // 预加载24小时和7天数据
     loadTrendData(targetId);
@@ -583,99 +570,46 @@ async function loadCardData(targetId){
 }
 
 // 加载趋势数据（首次加载和定期更新）
+function applyTrendResponse(targetId,range,payload){
+  var cached=trendCache[targetId];
+  if(!cached)cached=trendCache[targetId]={data:{'1d':[],'7d':[]},points:{'1d':[],'7d':[]},cursors:{'1d':0,'7d':0}};
+  cached.points[range]=PoeUI.mergeTrend(cached.points[range],payload.points||[],payload.window_start,range==='7d'?3600000:0);
+  cached.data[range]=cached.points[range].map(function(p){return p.value}).filter(function(v){return v!==null&&Number.isFinite(Number(v))}).map(Number);
+  cached.cursors[range]=payload.cursor_id||0;
+}
 async function loadTrendData(targetId){
-  var h=Object.assign({'Content-Type':'application/json'},authH());
+  var h=authH();
   try{
-    // 并行加载24小时和7天数据
-    var [res1d,res7d]=await Promise.all([
-      fetch(API+'/targets/'+targetId+'/price_trend?days=1',{headers:h}),
-      fetch(API+'/targets/'+targetId+'/price_trend?days=7',{headers:h})
-    ]);
-    
-    var data1d=await res1d.json();
-    var data7d=await res7d.json();
-    
-    // 缓存数据
-    trendCache[targetId]={
-      data:{
-        '1d':data1d.top10_avg_prices||[],
-        '7d':data7d.top10_avg_prices||[]
-      },
-      lastUpdate:new Date().toISOString()
-    };
-    
-    // 启动后台定时更新
+    var responses=await Promise.all([fetch(API+'/targets/'+targetId+'/price_trend?days=1',{headers:h}),fetch(API+'/targets/'+targetId+'/price_trend?days=7',{headers:h})]);
+    if(!responses.every(function(r){return r.ok}))throw new Error('趋势数据加载失败');
+    var payloads=await Promise.all(responses.map(function(r){return r.json()}));
+    if(!document.getElementById('mc-'+targetId))return;
+    delete trendCache[targetId];
+    applyTrendResponse(targetId,'1d',payloads[0]);applyTrendResponse(targetId,'7d',payloads[1]);
     startTrendAutoUpdate(targetId);
-    
-  }catch(e){
-    console.error('加载趋势数据失败:',e);
-  }
+  }catch(e){console.warn(e.message)}
 }
-
-// 后台定时更新趋势数据
 function startTrendAutoUpdate(targetId){
-  // 清除已有定时器
-  if(trendTimers[targetId]){
-    clearInterval(trendTimers[targetId]);
-  }
-  
-  // 获取扫描间隔（默认300秒）
-  var interval=getTargetScanInterval(targetId)*1000;
-  
-  // 设置定时器
-  trendTimers[targetId]=setInterval(function(){
-    updateTrendIncremental(targetId);
-  },interval);
+  if(trendTimers[targetId])clearInterval(trendTimers[targetId]);
+  trendTimers[targetId]=setInterval(function(){updateTrendIncremental(targetId)},getTargetScanInterval(targetId)*1000);
 }
-
-// 增量更新趋势数据
 async function updateTrendIncremental(targetId){
   var cached=trendCache[targetId];
-  if(!cached||!cached.lastUpdate){
-    // 没有缓存，完整加载
-    loadTrendData(targetId);
-    return;
-  }
-  
-  var h=Object.assign({'Content-Type':'application/json'},authH());
+  if(!cached){await loadTrendData(targetId);return}
+  if(cached.updating)return;
+  cached.updating=true;
   try{
-    // 尝试增量更新（只拉取最近的数据）
-    var since=cached.lastUpdate;
-    var [res1d,res7d]=await Promise.all([
-      fetch(API+'/targets/'+targetId+'/price_trend?days=1&since='+since,{headers:h}),
-      fetch(API+'/targets/'+targetId+'/price_trend?days=7&since='+since,{headers:h})
-    ]);
-    
-    // 检查响应是否成功
-    if(!res1d.ok||!res7d.ok){
-      throw new Error('增量更新失败');
-    }
-    
-    var newData1d=await res1d.json();
-    var newData7d=await res7d.json();
-    
-    // 合并新数据（如果有的话）
-    if(newData1d.top10_avg_prices&&newData1d.top10_avg_prices.length>0){
-      cached.data['1d']=cached.data['1d'].concat(newData1d.top10_avg_prices);
-    }
-    if(newData7d.top10_avg_prices&&newData7d.top10_avg_prices.length>0){
-      cached.data['7d']=cached.data['7d'].concat(newData7d.top10_avg_prices);
-    }
-    
-    cached.lastUpdate=new Date().toISOString();
-    
-  }catch(e){
-    console.warn('增量更新失败，尝试完整加载:',e);
-    // 增量更新失败，完整加载
-    loadTrendData(targetId);
-  }
+    var responses=await Promise.all(['1d','7d'].map(function(range){return fetch(API+'/targets/'+targetId+'/price_trend?days='+(range==='1d'?1:7)+'&cursor_id='+cached.cursors[range],{headers:authH()})}));
+    if(!responses.every(function(r){return r.ok}))throw new Error('趋势增量加载失败');
+    var payloads=await Promise.all(responses.map(function(r){return r.json()}));
+    if(trendCache[targetId]!==cached)return;
+    applyTrendResponse(targetId,'1d',payloads[0]);applyTrendResponse(targetId,'7d',payloads[1]);
+  }catch(e){console.warn(e.message)}finally{cached.updating=false}
 }
-
-// 获取目标的扫描间隔
 function getTargetScanInterval(targetId){
   // 默认300秒
   var defaultInterval=300;
-  
+
   // 尝试从DOM获取
   var card=document.getElementById('mc-'+targetId);
   if(card){
@@ -688,7 +622,7 @@ function getTargetScanInterval(targetId){
       }
     }
   }
-  
+
   return defaultInterval;
 }
 
@@ -701,7 +635,7 @@ function renderSnapshots(items){
     var mods='';
     if(it.explicit_mods){
       try{var arr=typeof it.explicit_mods==='string'?JSON.parse(it.explicit_mods):it.explicit_mods;
-        mods=arr.map(function(m){return '<div class="mc-item-mod">'+esc(m)+'</div>'}).join('');
+        mods=arr.map(function(m){return '<div class="mc-item-mod">'+esc(typeof m==='string'?m:(m&&m.description||m&&m.text||''))+'</div>'}).join('');
       }catch(e){mods='<div class="mc-item-mod">'+esc(it.explicit_mods)+'</div>'}
     }
     var listedTime='';
@@ -717,7 +651,7 @@ function renderSnapshots(items){
       listedTime='<span>上架: '+relTime+'</span>';
     }
     return '<div class="mc-item">'+
-      '<div class="mc-item-head"><span class="mc-item-name">'+esc(name)+'</span><span class="mc-item-price">'+price+'</span></div>'+
+      '<div class="mc-item-head"><span class="mc-item-name">'+esc(name)+'</span><span class="mc-item-price">'+esc(price)+'</span></div>'+
       '<div class="mc-item-info">'+(it.ilvl?'<span>物品等级: '+it.ilvl+'</span>':'')+(it.seller_account?'<span>卖家: '+esc(it.seller_account)+'</span>':'')+listedTime+'</div>'+
       (mods?'<div class="mc-item-mods">'+mods+'</div>':'')+
     '</div>';
@@ -794,14 +728,14 @@ async function switchPeriod(id,days,btn){
 function viewTrend(id){
   // 移除已有弹窗
   var old=document.getElementById('trend-overlay');if(old)old.remove();
-  
+
   // 检查缓存
   var cached=trendCache[id];
   if(!cached||!cached.data){
     showToast('暂无趋势数据',1500);
     return;
   }
-  
+
   // 默认显示24小时趋势
   var defaultRange='1d';
   var vals=cached.data[defaultRange];
@@ -814,26 +748,26 @@ function viewTrend(id){
     showToast('暂无趋势数据',1500);
     return;
   }
-  
+
   // 创建遮罩层
   var overlay=document.createElement('div');
   overlay.id='trend-overlay';
   overlay.className='trend-overlay';
   overlay.onclick=function(e){if(e.target===overlay)closeTrendPopup()};
-  
+
   // 创建浮动面板
   var popup=document.createElement('div');
   popup.className='trend-popup-modal';
   popup.innerHTML='<div class="trend-popup-head"><div class="trend-spacer"></div><div class="trend-range-btns"><button class="trend-btn active" data-range="1d" onclick="switchTrendRange('+id+',\'1d\',this)">24小时</button><button class="trend-btn" data-range="7d" onclick="switchTrendRange('+id+',\'7d\',this)">7天</button></div><button class="trend-close" onclick="closeTrendPopup()">✕</button></div><canvas id="trend-popup-canvas"></canvas>';
-  
+
   overlay.appendChild(popup);
   document.body.appendChild(overlay);
-  
+
   // ESC键关闭
   document.addEventListener('keydown',function escHandler(e){
     if(e.key==='Escape'){closeTrendPopup();document.removeEventListener('keydown',escHandler)}
   });
-  
+
   // 画图
   drawSmoothCurve('trend-popup-canvas',vals,defaultRange);
 }
@@ -848,20 +782,20 @@ function switchTrendRange(id,range,btn){
   var btns=btn.parentElement.querySelectorAll('.trend-btn');
   btns.forEach(function(b){b.classList.remove('active')});
   btn.classList.add('active');
-  
+
   // 获取数据
   var cached=trendCache[id];
   if(!cached||!cached.data||!cached.data[range]){
     showToast('暂无该时间范围的趋势数据',1500);
     return;
   }
-  
+
   var vals=cached.data[range].filter(function(v){return v!==null});
   if(!vals.length){
     showToast('暂无趋势数据',1500);
     return;
   }
-  
+
   // 重新绘制
   drawSmoothCurve('trend-popup-canvas',vals,range);
 }
@@ -877,7 +811,7 @@ function drawSmoothCurve(canvasId,values,timeRange){
   canvas.style.width=w+'px';canvas.style.height=h+'px';
   ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,w,h);
-  
+
   var mn=0;
   var mx=Math.max.apply(null,values)*1.15;
   if(mx===0)mx=1;
@@ -885,14 +819,14 @@ function drawSmoothCurve(canvasId,values,timeRange){
   var leftPad=50;
   var bottomPad=28;
   var topPad=12;
-  
+
   // 计算Y轴刻度（5个刻度：最大值、3/4、1/2、1/4、最小值）
   var dataRange=mx-mn;
   var ticks=[];
   for(var i=0;i<5;i++){
     ticks.push(mx-dataRange*(i/4));
   }
-  
+
   // 绘制网格线和Y轴标签
   ctx.strokeStyle='rgba(255,255,255,0.08)';
   ctx.lineWidth=1;
@@ -900,7 +834,7 @@ function drawSmoothCurve(canvasId,values,timeRange){
   ctx.font='11px sans-serif';
   ctx.textAlign='right';
   ctx.textBaseline='middle';
-  
+
   for(var i=0;i<ticks.length;i++){
     var y=topPad+((h-topPad-bottomPad)*(i/(ticks.length-1)));
     // 网格线
@@ -914,11 +848,11 @@ function drawSmoothCurve(canvasId,values,timeRange){
     var label=ticks[i]>=1000?(ticks[i]/1000).toFixed(1)+'k':ticks[i].toFixed(1);
     ctx.fillText(label,leftPad-8,y);
   }
-  
+
   // 绘制数据区域
   var graphW=w-leftPad-pad;
   var graphH=h-topPad-bottomPad;
-  
+
   // 计算点坐标
   var points=[];
   for(var i=0;i<values.length;i++){
@@ -926,11 +860,11 @@ function drawSmoothCurve(canvasId,values,timeRange){
     var y=topPad+graphH*(1-(values[i]-mn)/(mx-mn));
     points.push({x:x,y:y});
   }
-  
+
   // 使用贝塞尔曲线绘制平滑曲线
   ctx.beginPath();
   ctx.moveTo(points[0].x,points[0].y);
-  
+
   if(points.length===1){
     ctx.arc(points[0].x,points[0].y,3,0,Math.PI*2);
     ctx.fillStyle='#af6025';
@@ -950,7 +884,7 @@ function drawSmoothCurve(canvasId,values,timeRange){
     ctx.strokeStyle='#af6025';
     ctx.lineWidth=2;
     ctx.stroke();
-    
+
     // 填充渐变
     ctx.lineTo(points[points.length-1].x,h-bottomPad);
     ctx.lineTo(leftPad,h-bottomPad);
@@ -961,19 +895,19 @@ function drawSmoothCurve(canvasId,values,timeRange){
     ctx.fillStyle=gradient;
     ctx.fill();
   }
-  
+
   // 底部标注时间范围和单位
   ctx.fillStyle='rgba(255,255,255,0.4)';ctx.font='11px sans-serif';ctx.textAlign='right';ctx.textBaseline='bottom';
   var rangeText=timeRange==='1d'?'24小时':'7天';
   ctx.fillText('单位: 神圣石 · '+rangeText,w-pad,h-4);
-  
+
   // 绘制Y轴线
   ctx.strokeStyle='rgba(255,255,255,0.15)';
   ctx.beginPath();
   ctx.moveTo(leftPad,topPad);
   ctx.lineTo(leftPad,h-bottomPad);
   ctx.stroke();
-  
+
   // 绘制X轴线
   ctx.beginPath();
   ctx.moveTo(leftPad,h-bottomPad);
@@ -1044,10 +978,11 @@ function checkLoginStatus() {
   var mainContent = document.getElementById("mainContent");
   if (token) {
     closeLoginModal();
-    userArea.innerHTML = '<span class="user-name">'+(username||'用户')+'</span> <button class="btn-logout" onclick="doLogout()">退出</button>';
+    userArea.innerHTML = '<span class="user-name">'+esc(username||'用户')+'</span> <button class="btn-logout" onclick="doLogout()">退出</button>';
     mainContent.style.display = "block";
     // 从API获取真实用户名，覆盖localStorage旧值
     fetch('/api/user',{headers:{'Authorization':'Bearer '+token}}).then(function(r){return r.json()}).then(function(d){
+      if(localStorage.getItem('token')!==token)return;
       if(d.username){
         localStorage.setItem('username',d.username);
         var el=document.querySelector('.user-name');
@@ -1063,7 +998,10 @@ function checkLoginStatus() {
     mainContent.style.display = "none";
   }
 }
-function doLogout() {
+async function doLogout() {
+  try{await fetch("/auth/logout",{method:"POST",headers:authH()})}catch(_){}
+  Object.keys(trendTimers).forEach(function(id){clearInterval(trendTimers[id])});
+  trendTimers={};trendCache={};document.getElementById("mc-wrap").innerHTML="";
   localStorage.removeItem("token");
   localStorage.removeItem("username");
   checkLoginStatus();
@@ -1094,6 +1032,12 @@ async function doLogin() {
   } catch(e) { showToast("❌ 请求失败: " + e.message, 3000); }
 }
 document.addEventListener('DOMContentLoaded',init);
+window.addEventListener('storage',function(e){
+  if(e.key!=='token')return;
+  Object.keys(trendTimers).forEach(function(id){clearInterval(trendTimers[id])});
+  trendTimers={};trendCache={};document.getElementById('mc-wrap').innerHTML='';
+  checkLoginStatus();
+});
 </script>
 <!-- 登录弹窗 -->
 <div id="loginModal" style="display:none">
@@ -1117,5 +1061,3 @@ document.addEventListener('DOMContentLoaded',init);
 </body>
 
 </html>
-
-

@@ -25,3 +25,9 @@ Thumbs.db
 *.bak
 *.bak_*
 *.zip
+
+# Local checks and generated evidence
+.venv/
+.pytest_cache/
+output/
+.playwright-cli/

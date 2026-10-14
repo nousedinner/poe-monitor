@@ -1,65 +1,68 @@
-import sys
-import os
-sys.path.insert(0, '/path/to/your/project')  # 需要根据实际路径修改
+"""Conservative historical fingerprint repair; dry-run unless --apply is set.
 
-from app import create_app
-from app.models import db, Event
+Only a matching current raw snapshot can establish the missing source metadata.
+Unverifiable historical events are reported and left unchanged.
+"""
+
+import argparse
+from . import create_app, db
+from .models import Event, ItemSnapshot
+from .items import fingerprint, extract_mods, MOD_FIELDS, mod_text
 import json
-import hashlib
 
-def compute_fingerprint_hash(item_info):
-    """复现 scheduler 中的指纹计算逻辑"""
-    name = item_info.get('name', '')
-    base_type = item_info.get('typeLine', '')
-    # 提取词缀的逻辑与 scheduler 中的 _collect_all_mods 一致
-    mods = []
-    for key in ['explicitMods', 'implicitMods', 'fracturedMods', 'craftedMods', 'enchantMods', 'veiledMods']:
-        if key in item_info and item_info[key]:
-            mods.extend(item_info[key])
-    if 'notableProperties' in item_info:
-        for np in item_info['notableProperties']:
-            if 'name' in np:
-                mods.append(np['name'])
-    if 'properties' in item_info:
-        for prop in item_info['properties']:
-            name = prop.get('name', '')
-            values = prop.get('values', [])
-            if values and values[0] and values[0][0]:
-                value_str = values[0][0]
-                mods.append(f"{name}: {value_str}")
-    if 'builtInSupport' in item_info and item_info['builtInSupport']:
-        mods.append(f"内置辅助: {item_info['builtInSupport']}")
-    mods_sorted = sorted(mods)
-    fingerprint_str = f"{name}|{base_type}|{json.dumps(mods_sorted)}"
-    return hashlib.sha256(fingerprint_str.encode()).hexdigest()
+compute_fingerprint_hash = fingerprint
 
-def main():
-    app = create_app()  # 如果 create_app 函数名不同，请调整
-    with app.app_context():
-        events = Event.query.filter(Event.fingerprint_hash.is_(None)).all()
-        print(f"找到 {len(events)} 条未填充指纹的事件")
-        for event in events:
-            # 从 event 表中已有的字段构建 item_info
-            # 注意：event 表中没有完整的 item_data，只有 item_name、base_type、explicit_mods
-            # 所以需要模拟一个 item_info 字典
-            item_info = {
-                'name': event.item_name,
-                'typeLine': event.base_type,
-                'explicitMods': json.loads(event.explicit_mods) if event.explicit_mods else []
-            }
-            # 其他词缀字段在 event 中没有存储，但指纹计算需要包含所有词缀。然而 event 中只存了 explicit_mods，
-            # 但之前的扫描中，explicit_mods 已经包含了所有提取的词缀（见 scheduler 中 _collect_all_mods 返回的完整列表）。
-            # 所以直接用 event.explicit_mods 即可。但为了保持一致，我们还是调用 compute_fingerprint_hash 传入 item_info，
-            # 但注意 item_info 中其他字段可能缺失，导致指纹与实际扫描时计算的不一致。
-            # 更好的做法是：直接用 event.explicit_mods（已经是 JSON 字符串）和 item_name、base_type 组合。
-            # 这里简化：直接用 explicit_mods 作为 mods，因为 scheduler 中存入的就是 _collect_all_mods 的 JSON 数组。
-            mods = json.loads(event.explicit_mods) if event.explicit_mods else []
-            mods_sorted = sorted(mods)
-            fingerprint_str = f"{event.item_name}|{event.base_type}|{json.dumps(mods_sorted)}"
-            fp_hash = hashlib.sha256(fingerprint_str.encode()).hexdigest()
-            event.fingerprint_hash = fp_hash
-        db.session.commit()
-        print("指纹填充完成")
 
-if __name__ == '__main__':
-    main()
+def main(apply=False):
+    matched = skipped = 0
+    with create_app().app_context():
+        after_id = 0
+        while True:
+            # Buffer each page before issuing more queries on a MySQL connection.
+            batch = (
+                Event.query.filter(Event.fingerprint_hash.is_(None), Event.id > after_id)
+                .order_by(Event.id)
+                .limit(200)
+                .all()
+            )
+            if not batch:
+                break
+            after_id = batch[-1].id
+            for event in batch:
+                snapshot = ItemSnapshot.query.filter_by(
+                    target_id=event.target_id, item_id=event.item_id
+                ).first()
+                info = (snapshot.item_data or {}).get("item", {}) if snapshot else {}
+                same = (
+                    info.get("name") == event.item_name and info.get("typeLine") == event.base_type
+                )
+                mods = extract_mods(info)
+                for key, column in MOD_FIELDS.items():
+                    try:
+                        stored = json.loads(getattr(event, column) or "[]")
+                        same = (
+                            same
+                            and isinstance(stored, list)
+                            and sorted(mod_text(v) for v in stored) == sorted(mods[key])
+                        )
+                    except (ValueError, TypeError):
+                        same = False
+                if not same or not snapshot:
+                    skipped += 1
+                    continue
+                matched += 1
+                if apply:
+                    event.fingerprint_hash = fingerprint(info)
+        if apply:
+            db.session.commit()
+        else:
+            db.session.rollback()
+    print(
+        f"mode={'apply' if apply else 'dry-run'} verified={matched} skipped_unverifiable={skipped}"
+    )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--apply", action="store_true")
+    main(parser.parse_args().apply)

@@ -1,1008 +1,839 @@
+from collections import defaultdict
+from datetime import timedelta
+from decimal import Decimal
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+import threading
+import time
+import requests
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from datetime import datetime, timedelta
-from sqlalchemy import func
+from sqlalchemy import func, case, and_, delete
+from werkzeug.exceptions import BadRequest, NotFound
 from . import db
-from .models import MonitorTarget, UserCredential, Event, User, ItemSnapshot, PriceTrend
+from .models import (
+    MonitorTarget,
+    UserCredential,
+    Event,
+    User,
+    ItemSnapshot,
+    PriceTrend,
+    ScanJob,
+    DailyStats,
+)
 from .utils import encrypt_poesessid, decrypt_poesessid
-import json
-import requests
-import os
-import hashlib
-import time
+from .items import MOD_FIELDS, validate_details, money, PRECISION
+from .timeutils import utcnow, iso_utc, day_bounds, parse_utc
+from .validation import body, integer, query_int, text, price
+from .trade_query import normalize_query
+from .poe_api import PoeAPI
+from .tasks import ScanRejected
 
-api_bp = Blueprint('api', __name__)
+api_bp = Blueprint("api", __name__)
+TRADE_CACHE_DIR = os.path.join(tempfile.gettempdir(), "poe_trade_cache")
+TRADE_CACHE_TTL = 6 * 3600
+_cache_locks = {name: threading.Lock() for name in ["static.json", "stats.json", "filters.json"]}
 
-# 腾讯静态数据缓存（赛季内数据不变，避免每个用户每次打开页面都打腾讯API）
-TRADE_CACHE_DIR = '/tmp/poe_trade_cache'
-TRADE_CACHE_TTL = 6 * 3600  # 6小时
+
+@api_bp.before_request
+def validate_json_body():
+    if request.method in ["POST", "PUT", "PATCH"]:
+        if request.endpoint == "api.trigger_scan" and not request.get_data():
+            return
+        body()
+
+
+def _cache_path(name):
+    return Path(current_app.config.get("TRADE_CACHE_DIR", TRADE_CACHE_DIR)) / name
+
 
 def _read_trade_cache(name, allow_stale=False):
-    """读取缓存，返回 (data_str, etag)；TTL 内或 allow_stale 时有效"""
-    path = os.path.join(TRADE_CACHE_DIR, name)
+    path = _cache_path(name)
     try:
-        mtime = os.path.getmtime(path)
-        if not allow_stale and time.time() - mtime > TRADE_CACHE_TTL:
+        if not allow_stale and time.time() - path.stat().st_mtime > TRADE_CACHE_TTL:
             return None, None
-        with open(path, 'r', encoding='utf-8') as f:
-            data = f.read()
-        return data, hashlib.md5(data.encode('utf-8')).hexdigest()
+        value = path.read_text(encoding="utf8")
+        parsed = json.loads(value)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("result"), list):
+            return None, None
+        return value, hashlib.sha256(value.encode()).hexdigest()
     except (OSError, ValueError):
         return None, None
 
+
 def _write_trade_cache(name, data):
+    path = _cache_path(name)
+    temporary = None
     try:
-        os.makedirs(TRADE_CACHE_DIR, exist_ok=True)
-        with open(os.path.join(TRADE_CACHE_DIR, name), 'w', encoding='utf-8') as f:
-            f.write(data)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf8", dir=path.parent, delete=False
+        ) as stream:
+            temporary = stream.name
+            stream.write(data)
+        os.replace(temporary, path)
     except OSError:
         pass
+    finally:
+        if temporary and os.path.exists(temporary):
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
 
 def _cached_trade_response(name, upstream_url, label):
-    """通用缓存代理：优先缓存，未命中拉腾讯并写缓存；腾讯失败时兜底用旧缓存"""
-    cached, etag = _read_trade_cache(name)
-    if cached is not None:
-        resp = current_app.response_class(cached, mimetype='application/json')
-        resp.set_etag(etag)
-        resp.cache_control.no_cache = True
-        return resp.make_conditional(request)
-    try:
-        upstream = requests.get(upstream_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
-        data = upstream.text
-        _write_trade_cache(name, data)
-        resp = current_app.response_class(data, mimetype='application/json')
-        resp.set_etag(hashlib.md5(data.encode('utf-8')).hexdigest())
-        resp.cache_control.no_cache = True
-        return resp
-    except Exception as e:
-        stale, stale_etag = _read_trade_cache(name, allow_stale=True)
-        if stale is not None:
-            resp = current_app.response_class(stale, mimetype='application/json')
-            resp.set_etag(stale_etag)
-            resp.cache_control.no_cache = True
-            return resp
-        return jsonify({'msg': f'get {label} failed: {str(e)}'}), 500
+    stale = False
+    data, etag = _read_trade_cache(name)
+    if data is None:
+        with _cache_locks[name]:
+            data, etag = _read_trade_cache(name)
+            if data is None:
+                try:
+                    upstream = requests.get(
+                        upstream_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=(5, 20)
+                    )
+                    upstream.raise_for_status()
+                    parsed = upstream.json()
+                    if not isinstance(parsed, dict) or not isinstance(parsed.get("result"), list):
+                        raise ValueError("Invalid trade metadata")
+                    data = json.dumps(parsed, ensure_ascii=False)
+                    etag = hashlib.sha256(data.encode()).hexdigest()
+                    _write_trade_cache(name, data)
+                except (requests.RequestException, ValueError):
+                    data, etag = _read_trade_cache(name, allow_stale=True)
+                    if data is None:
+                        return jsonify(msg=f"{label} 数据暂不可用"), 502
+                    stale = True
+    response = current_app.response_class(data, mimetype="application/json")
+    response.set_etag(etag)
+    response.cache_control.no_cache = True
+    if stale:
+        response.headers["X-Cache-Stale"] = "true"
+    return response.make_conditional(request)
 
-def convert_filters(filters):
-    """转换前端传来的filters格式为POE API格式
-    前端price格式: {"price": {"option": "divine", "value": {"max": 300}}}
-    POE API格式:   {"price": {"option": "divine", "max": 300}}
-    """
-    if not filters:
-        return filters
-    
-    result = {}
-    for group_name, group_data in filters.items():
-        if not isinstance(group_data, dict) or 'filters' not in group_data:
-            result[group_name] = group_data
-            continue
-        
-        new_filters = {}
-        for filter_name, filter_value in group_data['filters'].items():
-            # 处理 price 等带 value 嵌套的字段
-            if isinstance(filter_value, dict) and 'value' in filter_value and isinstance(filter_value['value'], dict):
-                # 合并 option 和 value 中的字段
-                new_filter = {}
-                if 'option' in filter_value:
-                    new_filter['option'] = filter_value['option']
-                # 把 value 中的 min/max 提取到顶层
-                for k, v in filter_value['value'].items():
-                    new_filter[k] = v
-                new_filters[filter_name] = new_filter
-            else:
-                new_filters[filter_name] = filter_value
-        
-        result[group_name] = {'filters': new_filters}
-    
+
+def _user():
+    return db.session.get(User, int(get_jwt_identity()))
+
+
+def _target(target_id, lock=False):
+    query = MonitorTarget.query.filter_by(id=target_id, user_id=int(get_jwt_identity()))
+    if lock:
+        query = query.with_for_update()
+    result = query.first()
+    if result is None:
+        raise NotFound("Target not found")
     return result
 
 
-def convert_stats(stats):
-    """腾讯POE市集API使用小写类型名(and/not/if/count)，无需转换。
-    weight/weight2 不是官方API类型，暂不支持。
-    """
-    return stats
+def _qp(target):
+    value = target.query_params
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = {}
+    return value if isinstance(value, dict) else {}
 
 
-@api_bp.route('/user', methods=['GET'])
+def _target_json(target):
+    params = _qp(target)
+    return dict(
+        id=target.id,
+        target_type=target.target_type,
+        poe_account_name=target.poe_account_name,
+        query_params=params,
+        query_id=params.get("_query_id", ""),
+        league=target.league,
+        scan_interval=target.scan_interval,
+        min_price=target.min_price,
+        enabled=target.enabled,
+        last_scan=iso_utc(target.last_scan),
+        baseline_reset=target.baseline_reset,
+    )
+
+
+def _sum_when(condition, value):
+    return func.sum(case((condition, value), else_=0))
+
+
+@api_bp.get("/user")
 @jwt_required()
 def get_user_info():
-    user_id = int(get_jwt_identity())
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({'msg': 'User not found'}), 404
-    return jsonify({
-        'id': user.id,
-        'username': user.username,
-        'is_admin': user.is_admin
-    }), 200
+    user = _user()
+    return jsonify(id=user.id, username=user.username, is_admin=user.is_admin)
 
-@api_bp.route('/targets', methods=['GET', 'POST'])
+
+@api_bp.route("/targets", methods=["GET", "POST"])
 @jwt_required()
 def manage_targets():
-    user_id = int(get_jwt_identity())
-    if request.method == 'GET':
-        targets = MonitorTarget.query.filter_by(user_id=user_id).order_by(MonitorTarget.sort_order.asc(), MonitorTarget.id.asc()).all()
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        yesterday = (datetime.utcnow() - timedelta(days=1)).date()
-        result = []
-        for t in targets:
-            # 今日新增/售出次数（只统计非冗余事件）
-            today_new = Event.query.filter(
-                Event.target_id == t.id,
-                Event.event_type == 'listed',
-                Event.created_at >= today_start,
-                Event.is_redundant == False
-            ).count()
-            today_sold_count = Event.query.filter(
-                Event.target_id == t.id,
-                Event.event_type == 'sold',
-                Event.created_at >= today_start,
-                Event.is_redundant == False
-            ).count()
-            
-            # 昨日售出（分货币，只统计非冗余）
-            yesterday_divine = db.session.query(func.sum(Event.price)).filter(
-                Event.target_id == t.id,
-                Event.event_type == 'sold',
-                db.func.date(Event.created_at) == yesterday,
-                Event.price_currency == 'divine',
-                Event.is_redundant == False
-            ).scalar() or 0
-            yesterday_chaos = db.session.query(func.sum(Event.price)).filter(
-                Event.target_id == t.id,
-                Event.event_type == 'sold',
-                db.func.date(Event.created_at) == yesterday,
-                Event.price_currency == 'chaos',
-                Event.is_redundant == False
-            ).scalar() or 0
-            
-            # 今日售出（分货币，只统计非冗余）
-            today_divine = db.session.query(func.sum(Event.price)).filter(
-                Event.target_id == t.id,
-                Event.event_type == 'sold',
-                Event.created_at >= today_start,
-                Event.price_currency == 'divine',
-                Event.is_redundant == False
-            ).scalar() or 0
-            today_chaos = db.session.query(func.sum(Event.price)).filter(
-                Event.target_id == t.id,
-                Event.event_type == 'sold',
-                Event.created_at >= today_start,
-                Event.price_currency == 'chaos',
-                Event.is_redundant == False
-            ).scalar() or 0
-            
-            # 当前在售总价（分货币，快照表无冗余字段，所以无需过滤）
-            current_divine = db.session.query(func.sum(ItemSnapshot.price)).filter(
-                ItemSnapshot.target_id == t.id,
-                ItemSnapshot.price_currency == 'divine'
-            ).scalar() or 0
-            current_chaos = db.session.query(func.sum(ItemSnapshot.price)).filter(
-                ItemSnapshot.target_id == t.id,
-                ItemSnapshot.price_currency == 'chaos'
-            ).scalar() or 0
-            current_mirror = db.session.query(func.sum(ItemSnapshot.price)).filter(
-                ItemSnapshot.target_id == t.id,
-                ItemSnapshot.price_currency == 'mirror'
-            ).scalar() or 0
-
-            # 在售物品数
-            item_count = ItemSnapshot.query.filter_by(target_id=t.id).count()
-
-            # 提取 query_id
-            qp = t.query_params if isinstance(t.query_params, dict) else (json.loads(t.query_params) if t.query_params else {})
-            query_id = qp.get('_query_id', '') if qp else ''
-
-            result.append({
-                'id': t.id,
-                'target_type': t.target_type or 'account',
-                'poe_account_name': t.poe_account_name,
-                'query_params': qp,
-                'query_id': query_id,
-                'league': t.league,
-                'scan_interval': t.scan_interval,
-                'min_price': t.min_price,
-                'enabled': t.enabled if hasattr(t, 'enabled') else True,
-                'last_scan': t.last_scan.isoformat() if t.last_scan else None,
-                'today_new': today_new,
-                'today_sold_count': today_sold_count,
-                'yesterday_divine': yesterday_divine,
-                'yesterday_chaos': yesterday_chaos,
-                'today_divine': today_divine,
-                'today_chaos': today_chaos,
-                'current_divine': current_divine,
-                'current_chaos': current_chaos,
-                'current_mirror': current_mirror,
-                'item_count': item_count,
-            })
-        return jsonify(result), 200
-    elif request.method == 'POST':
-        data = request.get_json()
-        target_type = data.get('target_type', 'account')
-        poe_account_name = data.get('poe_account_name')
-        scan_interval = data.get('scan_interval', 120)
-        min_price = data.get('min_price')
-        league = data.get('league', 'S30赛季')
-        query_params = data.get('query_params')
-        user = User.query.get(user_id)
-        min_interval = 60 if user.is_admin else 300
-        if scan_interval < min_interval:
-            return jsonify({'msg': f'扫描间隔不能小于 {min_interval} 秒'}), 400
-        if target_type == 'account':
-            if not poe_account_name:
-                return jsonify({'msg': '账号监控必须填写账号名'}), 400
-            existing = MonitorTarget.query.filter_by(user_id=user_id, poe_account_name=poe_account_name).first()
-            if existing:
-                return jsonify({'msg': 'Target already exists'}), 400
-        elif target_type == 'global':
-            if not query_params:
-                return jsonify({'msg': '全服监控必须提供筛选条件 query_params'}), 400
-            poe_account_name = None  # 全服监控不需要账号名
-        else:
-            return jsonify({'msg': 'target_type 必须为 account 或 global'}), 400
-        target = MonitorTarget(
-            user_id=user_id,
-            poe_account_name=poe_account_name,
-            league=league,
-            scan_interval=scan_interval,
-            min_price=min_price,
-            target_type=target_type,
-            query_params=query_params,
+    user = _user()
+    if request.method == "GET":
+        targets = (
+            MonitorTarget.query.filter_by(user_id=user.id)
+            .order_by(MonitorTarget.sort_order, MonitorTarget.id)
+            .all()
         )
-        db.session.add(target)
-        db.session.commit()
-        # 触发立即扫描
-        scheduler = current_app.scheduler
-        scheduler.trigger_immediate_scan(target.id)
-        return jsonify({'id': target.id}), 201
+        if not targets:
+            return jsonify([])
+        ids = [t.id for t in targets]
+        yesterday, today, tomorrow = day_bounds()
+        today_cond = and_(Event.created_at >= today, Event.created_at < tomorrow)
+        yesterday_cond = and_(Event.created_at >= yesterday, Event.created_at < today)
+        columns = [
+            Event.target_id,
+            _sum_when(and_(today_cond, Event.event_type == "listed"), 1).label("today_new"),
+            _sum_when(and_(today_cond, Event.event_type == "sold"), 1).label("today_sold_count"),
+        ]
+        for prefix, condition in [("today", today_cond), ("yesterday", yesterday_cond)]:
+            for currency in ["divine", "chaos"]:
+                columns.append(
+                    _sum_when(
+                        and_(
+                            condition, Event.event_type == "sold", Event.price_currency == currency
+                        ),
+                        Event.price,
+                    ).label(f"{prefix}_{currency}")
+                )
+        event_rows = (
+            db.session.query(*columns)
+            .filter(
+                Event.target_id.in_(ids),
+                Event.created_at >= yesterday,
+                Event.created_at < tomorrow,
+                Event.is_redundant.is_(False),
+            )
+            .group_by(Event.target_id)
+            .all()
+        )
+        events = {row.target_id: dict(row._mapping) for row in event_rows}
+        columns = [ItemSnapshot.target_id, func.count(ItemSnapshot.id).label("item_count")]
+        for currency in ["divine", "chaos", "mirror"]:
+            columns.append(
+                _sum_when(ItemSnapshot.price_currency == currency, ItemSnapshot.price).label(
+                    "current_" + currency
+                )
+            )
+        snapshot_rows = (
+            db.session.query(*columns)
+            .filter(ItemSnapshot.target_id.in_(ids))
+            .group_by(ItemSnapshot.target_id)
+            .all()
+        )
+        snapshots = {row.target_id: dict(row._mapping) for row in snapshot_rows}
+        output = []
+        for target in targets:
+            value = _target_json(target)
+            for name in [
+                "today_new",
+                "today_sold_count",
+                "today_divine",
+                "today_chaos",
+                "yesterday_divine",
+                "yesterday_chaos",
+            ]:
+                value[name] = events.get(target.id, {}).get(name, 0) or 0
+            for name in ["item_count", "current_divine", "current_chaos", "current_mirror"]:
+                value[name] = snapshots.get(target.id, {}).get(name, 0) or 0
+            output.append(value)
+        return jsonify(output)
+    data = body()
+    kind = data.get("target_type", "account")
+    if kind not in ["account", "global"]:
+        raise BadRequest("target_type 必须为 account 或 global")
+    account = text(data.get("poe_account_name"), "账号名") if kind == "account" else None
+    params = normalize_query(data.get("query_params")) if kind == "global" else None
+    minimum = 60 if user.is_admin else 300
+    interval = integer(data.get("scan_interval", 300), "scan_interval", minimum, 86400)
+    league = text(data.get("league", "S30赛季"), "league", 50)
+    if account and MonitorTarget.query.filter_by(user_id=user.id, poe_account_name=account).first():
+        raise BadRequest("Target already exists")
+    target = MonitorTarget(
+        user_id=user.id,
+        target_type=kind,
+        poe_account_name=account,
+        query_params=params,
+        league=league,
+        scan_interval=interval,
+        min_price=price(data.get("min_price")),
+    )
+    db.session.add(target)
+    db.session.flush()
+    current_app.scheduler.trigger_immediate_scan(target.id, commit=False)
+    db.session.commit()
+    return jsonify(id=target.id), 201
 
-@api_bp.route('/targets/<int:target_id>', methods=['PUT', 'DELETE'])
+
+@api_bp.route("/targets/<int:target_id>", methods=["PUT", "DELETE"])
 @jwt_required()
 def target_detail(target_id):
-    user_id = int(get_jwt_identity())
-    target = MonitorTarget.query.filter_by(id=target_id, user_id=user_id).first()
-    if not target:
-        return jsonify({'msg': 'Target not found'}), 404
-    if request.method == 'PUT':
-        data = request.get_json()
-        user = User.query.get(user_id)
-        min_interval = 60 if user.is_admin else 300
-        new_interval = data.get('scan_interval', target.scan_interval)
-        if new_interval < min_interval:
-            return jsonify({'msg': f'扫描间隔不能小于 {min_interval} 秒'}), 400
-        target.scan_interval = new_interval
-        target.min_price = data.get('min_price', target.min_price)
-        # 更新启用状态（如果提供了）
-        if 'enabled' in data:
-            target.enabled = data['enabled']
-        if 'query_params' in data:
-            target.query_params = data['query_params']
+    target = _target(target_id, True)
+    if request.method == "DELETE":
+        for model in [ScanJob, Event, ItemSnapshot, DailyStats, PriceTrend]:
+            db.session.execute(delete(model).where(model.target_id == target_id))
+        db.session.delete(target)
         db.session.commit()
-        return jsonify({'msg': 'Updated'}), 200
-    elif request.method == 'DELETE':
-        from sqlalchemy import text
-        try:
-            db.session.execute(text('DELETE FROM events WHERE target_id = :tid'), {'tid': target_id})
-            db.session.execute(text('DELETE FROM item_snapshots WHERE target_id = :tid'), {'tid': target_id})
-            db.session.execute(text('DELETE FROM daily_stats WHERE target_id = :tid'), {'tid': target_id})
-            db.session.execute(text('DELETE FROM price_trend WHERE target_id = :tid'), {'tid': target_id})
-            db.session.execute(text('DELETE FROM monitor_targets WHERE id = :tid'), {'tid': target_id})
-            db.session.commit()
-            return jsonify({'msg': 'Deleted'}), 200
-        except Exception as e:
-            db.session.rollback()
-            return jsonify({'msg': str(e)}), 500
+        return jsonify(msg="Deleted")
+    data = body()
+    interval = integer(
+        data.get("scan_interval", target.scan_interval),
+        "scan_interval",
+        60 if _user().is_admin else 300,
+        86400,
+    )
+    minimum = price(data.get("min_price", target.min_price))
+    params = (
+        normalize_query(data["query_params"]) if "query_params" in data else target.query_params
+    )
+    if "enabled" in data and not isinstance(data["enabled"], bool):
+        raise BadRequest("enabled 必须为布尔值")
+    changed_filter = minimum != target.min_price or params != target.query_params
+    changed_enabled = data.get("enabled", target.enabled) != target.enabled
+    if changed_filter or changed_enabled:
+        target.revision += 1
+    if changed_filter:
+        target.baseline_reset = True
+    target.scan_interval, target.min_price, target.query_params = interval, minimum, params
+    target.enabled = data.get("enabled", target.enabled)
+    if target.enabled and (changed_filter or changed_enabled):
+        job = db.session.get(ScanJob, target_id)
+        if job:
+            job.state, job.lease_token, job.lease_until = "queued", None, None
+            job.next_run_at = utcnow()
+        else:
+            current_app.scheduler.trigger_immediate_scan(target_id, commit=False)
+    db.session.commit()
+    return jsonify(msg="Updated")
 
-@api_bp.route('/targets/sort', methods=['PUT'])
+
+@api_bp.put("/targets/sort")
 @jwt_required()
 def update_targets_order():
-    user_id = int(get_jwt_identity())
-    data = request.get_json()
-    order_ids = data.get('order', [])
-    if not order_ids:
-        return jsonify({'msg': 'No order provided'}), 400
-    
-    # 验证所有目标都属于当前用户
-    targets = MonitorTarget.query.filter(MonitorTarget.id.in_(order_ids), MonitorTarget.user_id == user_id).all()
-    if len(targets) != len(order_ids):
-        return jsonify({'msg': 'Some targets not found or not owned by user'}), 403
-    
-    # 批量更新 sort_order
-    for idx, target_id in enumerate(order_ids):
-        db.session.execute(
-            MonitorTarget.__table__.update().where(MonitorTarget.id == target_id).values(sort_order=idx)
-        )
+    ids = body().get("order")
+    if (
+        not isinstance(ids, list)
+        or not ids
+        or len(ids) > 1000
+        or any(isinstance(v, bool) or not isinstance(v, int) for v in ids)
+        or len(ids) != len(set(ids))
+    ):
+        raise BadRequest("order 必须为不重复的目标 ID 列表")
+    targets = MonitorTarget.query.filter(
+        MonitorTarget.user_id == int(get_jwt_identity()), MonitorTarget.id.in_(ids)
+    ).all()
+    if len(targets) != len(ids):
+        return jsonify(msg="Some targets not found or not owned by user"), 403
+    positions = {value: index for index, value in enumerate(ids)}
+    for target in targets:
+        target.sort_order = positions[target.id]
     db.session.commit()
-    return jsonify({'msg': 'Order updated'}), 200
+    return jsonify(msg="Order updated")
 
 
-@api_bp.route('/targets/<int:target_id>/trigger', methods=['POST'])
+@api_bp.post("/targets/<int:target_id>/trigger")
 @jwt_required()
 def trigger_scan(target_id):
-    """立即刷新扫描（60秒冷却）"""
-    from flask import current_app
-    user_id = int(get_jwt_identity())
-    target = MonitorTarget.query.filter_by(id=target_id, user_id=user_id).first()
-    if not target:
-        return jsonify({'msg': 'Target not found'}), 404
-    # 冷却检查：用 last_scan 判断
-    if target.last_scan:
-        elapsed = (datetime.utcnow() - target.last_scan).total_seconds()
-        if elapsed < 60:
-            return jsonify({'msg': f'请等待 {int(60 - elapsed)} 秒后再刷新', 'cooldown': int(60 - elapsed)}), 429
-    scheduler = current_app.scheduler
-    if scheduler:
-        scheduler.trigger_immediate_scan(target_id)
-    return jsonify({'msg': '已触发刷新', 'cooldown': 60}), 200
+    _target(target_id)
+    try:
+        current_app.scheduler.trigger_immediate_scan(target_id, manual=True)
+    except ScanRejected as exc:
+        db.session.rollback()
+        response = jsonify(msg=str(exc), cooldown=exc.cooldown)
+        if exc.cooldown:
+            response.headers["Retry-After"] = str(exc.cooldown)
+        return response, exc.status
+    return jsonify(msg="已触发刷新", cooldown=60)
 
 
-@api_bp.route('/targets/<int:target_id>/snapshots', methods=['GET'])
+def _parse_mods(value):
+    try:
+        parsed = json.loads(value) if value else []
+        return parsed if isinstance(parsed, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+@api_bp.get("/targets/<int:target_id>/snapshots")
 @jwt_required()
 def get_snapshots(target_id):
-    """获取当前在售物品快照（含词缀、卖家、价格）"""
-    user_id = int(get_jwt_identity())
-    target = MonitorTarget.query.filter_by(id=target_id, user_id=user_id).first()
-    if not target:
-        return jsonify({'msg': 'Target not found'}), 404
-    limit = request.args.get('limit', 20, type=int)
-    snapshots = ItemSnapshot.query.filter_by(target_id=target_id).order_by(ItemSnapshot.price.asc()).limit(limit).all()
-    result = []
-    for s in snapshots:
-        # 合并所有词缀
-        all_mods = []
-        for mods_field in [s.explicit_mods, s.implicit_mods, s.fractured_mods, s.crafted_mods, s.enchant_mods, s.mutated_mods, s.veiled_mods]:
-            if mods_field:
-                try:
-                    mods_list = json.loads(mods_field)
-                    if isinstance(mods_list, list):
-                        all_mods.extend(mods_list)
-                except Exception:
-                    pass
-        
-        # 如果新字段没有数据，从 item_data 提取
-        if not all_mods and s.item_data:
-            try:
-                item_info = s.item_data.get('item', {})
-                for key in ['explicitMods', 'implicitMods', 'fracturedMods', 'craftedMods', 'enchantMods', 'mutatedMods', 'veiledMods']:
-                    mods = item_info.get(key, [])
-                    if mods:
-                        all_mods.extend(mods)
-            except Exception:
-                pass
-        
-        # 从 item_data 提取 ilvl（如果字段为空）
-        ilvl = s.ilvl
-        if not ilvl and s.item_data:
-            try:
-                ilvl = s.item_data.get('item', {}).get('ilvl')
-            except Exception:
-                pass
-        
-        result.append({
-            'item_id': s.item_id,
-            'item_name': s.item_name or '',
-            'base_type': s.base_type or '',
-            'rarity': s.rarity or '',
-            'ilvl': ilvl,
-            'explicit_mods': json.dumps(all_mods),
-            'price': s.price,
-            'price_currency': s.price_currency,
-            'seller_account': s.seller_account or '',
-            'item_data': s.item_data,
-            'scan_timestamp': s.scan_timestamp.isoformat() if s.scan_timestamp else None,
-        })
-    return jsonify(result), 200
+    target = _target(target_id)
+    rows = (
+        ItemSnapshot.query.filter_by(target_id=target_id)
+        .order_by(ItemSnapshot.price, ItemSnapshot.id)
+        .limit(query_int("limit", 20, 1, 2000))
+        .all()
+    )
+    output = []
+    for row in rows:
+        mods = [mod for field in MOD_FIELDS.values() for mod in _parse_mods(getattr(row, field))]
+        output.append(
+            dict(
+                item_id=row.item_id,
+                item_name=row.item_name or "",
+                base_type=row.base_type or "",
+                rarity=row.rarity or "",
+                ilvl=row.ilvl,
+                explicit_mods=json.dumps(mods, ensure_ascii=False),
+                price=row.price,
+                price_currency=row.price_currency,
+                seller_account=row.seller_account or "",
+                item_data=row.item_data,
+                scan_timestamp=iso_utc(row.scan_timestamp),
+            )
+        )
+    response = jsonify(output)
+    response.headers["X-Last-Scan"] = iso_utc(target.last_scan) or ""
+    return response
 
 
-@api_bp.route('/targets/<int:target_id>/sale_stats', methods=['GET'])
+@api_bp.get("/targets/<int:target_id>/sale_stats")
 @jwt_required()
 def get_sale_stats(target_id):
-    """获取多时段上架/售出统计"""
-    user_id = int(get_jwt_identity())
-    target = MonitorTarget.query.filter_by(id=target_id, user_id=user_id).first()
-    if not target:
-        return jsonify({'msg': 'Target not found'}), 404
-    days = request.args.get('days', 1, type=int)
-    if days not in (1, 3, 5, 7):
-        return jsonify({'msg': 'days 必须为 1/3/5/7'}), 400
-    start = datetime.utcnow() - timedelta(days=days)
-    listed = Event.query.filter(
-        Event.target_id == target_id,
-        Event.event_type == 'listed',
-        Event.created_at >= start,
-        Event.is_redundant == False
-    ).count()
-    sold = Event.query.filter(
-        Event.target_id == target_id,
-        Event.event_type == 'sold',
-        Event.created_at >= start,
-        Event.is_redundant == False
-    ).count()
-    sold_divine = db.session.query(func.sum(Event.price)).filter(
-        Event.target_id == target_id,
-        Event.event_type == 'sold',
-        Event.created_at >= start,
-        Event.price_currency == 'divine',
-        Event.is_redundant == False
-    ).scalar() or 0
-    sold_chaos = db.session.query(func.sum(Event.price)).filter(
-        Event.target_id == target_id,
-        Event.event_type == 'sold',
-        Event.created_at >= start,
-        Event.price_currency == 'chaos',
-        Event.is_redundant == False
-    ).scalar() or 0
-    return jsonify({
-        'days': days,
-        'listed': listed,
-        'sold': sold,
-        'sold_divine': sold_divine,
-        'sold_chaos': sold_chaos,
-    }), 200
+    _target(target_id)
+    days = query_int("days", 1, 1, 7)
+    if days not in [1, 3, 5, 7]:
+        raise BadRequest("days 必须为 1/3/5/7")
+    columns = [_sum_when(Event.event_type == "listed", 1), _sum_when(Event.event_type == "sold", 1)]
+    columns += [
+        _sum_when(and_(Event.event_type == "sold", Event.price_currency == currency), Event.price)
+        for currency in ["divine", "chaos", "mirror"]
+    ]
+    row = (
+        db.session.query(*columns)
+        .filter(
+            Event.target_id == target_id,
+            Event.created_at >= utcnow() - timedelta(days=days),
+            Event.is_redundant.is_(False),
+        )
+        .one()
+    )
+    return jsonify(
+        dict(
+            zip(
+                ["listed", "sold", "sold_divine", "sold_chaos", "sold_mirror"],
+                [v or 0 for v in row],
+            ),
+            days=days,
+        )
+    )
 
 
-@api_bp.route('/credentials', methods=['GET', 'POST'])
+@api_bp.route("/credentials", methods=["GET", "POST"])
 @jwt_required()
 def manage_credentials():
     user_id = int(get_jwt_identity())
-    if request.method == 'GET':
-        cred = UserCredential.query.get(user_id)
-        if cred:
-            return jsonify({
-                'last_updated': cred.last_updated.isoformat() if cred.last_updated else None
-            }), 200
-        return jsonify({'last_updated': None}), 200
-    elif request.method == 'POST':
-        data = request.get_json()
-        poesessid = data.get('poesessid')
-        pt2gguin = data.get('pt2gguin')
-        cookie = data.get('cookie')
-        if cookie:
-            import re
-            match_poe = re.search(r'POESESSID=([^;]+)', cookie)
-            match_pt = re.search(r'pt2gguin=([^;]+)', cookie)
-            if match_poe:
-                poesessid = match_poe.group(1)
-            if match_pt:
-                pt2gguin = match_pt.group(1)
-        if not poesessid:
-            return jsonify({'msg': 'Missing poesessid'}), 400
-        encrypted_poesessid = encrypt_poesessid(poesessid)
-        encrypted_pt2gguin = encrypt_poesessid(pt2gguin) if pt2gguin else None
-        cred = UserCredential.query.get(user_id)
-        if cred:
-            cred.encrypted_poesessid = encrypted_poesessid
-            cred.encrypted_pt2gguin = encrypted_pt2gguin
-            cred.last_updated = datetime.utcnow()
-        else:
-            cred = UserCredential(
-                user_id=user_id,
-                encrypted_poesessid=encrypted_poesessid,
-                encrypted_pt2gguin=encrypted_pt2gguin
-            )
-            db.session.add(cred)
-        db.session.commit()
-        return jsonify({'msg': 'Credentials saved'}), 200
+    credential = db.session.get(UserCredential, user_id)
+    if request.method == "GET":
+        return jsonify(last_updated=iso_utc(credential.last_updated) if credential else None)
+    data = body()
+    cookie = data.get("cookie")
+    poesessid, pt = data.get("poesessid"), data.get("pt2gguin")
+    if cookie:
+        cookie = text(cookie, "cookie", 32768)
+        match = re.search(r"(?:^|;\s*)POESESSID=([^;]+)", cookie)
+        ptmatch = re.search(r"(?:^|;\s*)pt2gguin=([^;]+)", cookie)
+        if match:
+            poesessid = match[1].strip()
+        if ptmatch:
+            pt = ptmatch[1].strip()
+    poesessid = text(poesessid, "poesessid", 4096)
+    pt = text(pt, "pt2gguin", 4096, optional=True)
+    if credential is None:
+        credential = UserCredential(user_id=user_id)
+        db.session.add(credential)
+    credential.encrypted_poesessid = encrypt_poesessid(poesessid)
+    credential.encrypted_pt2gguin = encrypt_poesessid(pt) if pt else None
+    credential.last_updated = utcnow()
+    db.session.commit()
+    return jsonify(msg="Credentials saved")
 
-@api_bp.route('/targets/<int:target_id>/events', methods=['GET'])
+
+def _event_json(event, target=None):
+    value = {
+        field: getattr(event, field)
+        for field in [
+            "id",
+            "target_id",
+            "item_id",
+            "item_name",
+            "base_type",
+            "price",
+            "price_old",
+            "price_currency",
+            "price_currency_old",
+            "event_type",
+            "is_redundant",
+            "is_gem",
+            "seller_account",
+        ]
+    }
+    value.update({field: _parse_mods(getattr(event, field)) for field in MOD_FIELDS.values()})
+    value["created_at"] = iso_utc(event.created_at)
+    if target:
+        value.update(target_name=target.poe_account_name, target_type=target.target_type)
+    return value
+
+
+@api_bp.get("/targets/<int:target_id>/events")
 @jwt_required()
 def get_events(target_id):
-    user_id = int(get_jwt_identity())
-    target = MonitorTarget.query.filter_by(id=target_id, user_id=user_id).first()
-    if not target:
-        return jsonify({'msg': 'Target not found'}), 404
-    limit = request.args.get('limit', 50, type=int)
-    offset = request.args.get('offset', 0, type=int)
-    event_type = request.args.get('event_type')
-    is_redundant = request.args.get('is_redundant')  # 可选，前端可传 0 或 1
-    query = Event.query.filter_by(target_id=target.id)
-    if event_type:
-        query = query.filter_by(event_type=event_type)
-    if is_redundant is not None:
-        query = query.filter_by(is_redundant=(is_redundant == '1'))
-    events = query.order_by(Event.created_at.desc()).limit(limit).offset(offset).all()
-    def _parse_mods(field):
-        if field:
-            try:
-                v = json.loads(field)
-                return v if isinstance(v, list) else []
-            except Exception:
-                return []
-        return []
-
-    return jsonify([{
-        'id': e.id,
-        'item_id': e.item_id,
-        'item_name': e.item_name,
-        'base_type': e.base_type,
-        'explicit_mods': _parse_mods(e.explicit_mods),
-        'implicit_mods': _parse_mods(e.implicit_mods),
-        'fractured_mods': _parse_mods(e.fractured_mods),
-        'crafted_mods': _parse_mods(e.crafted_mods),
-        'enchant_mods': _parse_mods(e.enchant_mods),
-        'mutated_mods': _parse_mods(e.mutated_mods),
-        'veiled_mods': _parse_mods(e.veiled_mods),
-        'price': e.price,
-        'price_old': e.price_old,
-        'price_currency': e.price_currency,
-        'event_type': e.event_type,
-        'is_redundant': e.is_redundant,
-        'is_gem': e.is_gem,
-        'seller_account': e.seller_account,
-        'created_at': e.created_at.isoformat()
-    } for e in events]), 200
-
-@api_bp.route('/stats', methods=['GET'])
-@jwt_required()
-def get_stats():
-    user_id = int(get_jwt_identity())
-    yesterday = datetime.utcnow().date() - timedelta(days=1)
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # 昨日售出总价值（分货币，只统计非冗余）
-    yesterday_divine = db.session.query(func.sum(Event.price)).filter(
-        Event.target.has(user_id=user_id),
-        Event.event_type == 'sold',
-        db.func.date(Event.created_at) == yesterday,
-        Event.price_currency == 'divine',
-        Event.is_redundant == False
-    ).scalar() or 0
-    yesterday_chaos = db.session.query(func.sum(Event.price)).filter(
-        Event.target.has(user_id=user_id),
-        Event.event_type == 'sold',
-        db.func.date(Event.created_at) == yesterday,
-        Event.price_currency == 'chaos',
-        Event.is_redundant == False
-    ).scalar() or 0
-    
-    # 今日售出总价值（分货币，只统计非冗余）
-    today_divine = db.session.query(func.sum(Event.price)).filter(
-        Event.target.has(user_id=user_id),
-        Event.event_type == 'sold',
-        Event.created_at >= today_start,
-        Event.price_currency == 'divine',
-        Event.is_redundant == False
-    ).scalar() or 0
-    today_chaos = db.session.query(func.sum(Event.price)).filter(
-        Event.target.has(user_id=user_id),
-        Event.event_type == 'sold',
-        Event.created_at >= today_start,
-        Event.price_currency == 'chaos',
-        Event.is_redundant == False
-    ).scalar() or 0
-    
-    # 当前在售总价值（分货币，快照表无冗余字段，无需过滤）
-    current_divine = db.session.query(func.sum(ItemSnapshot.price)).filter(
-        ItemSnapshot.target.has(user_id=user_id),
-        ItemSnapshot.price_currency == 'divine'
-    ).scalar() or 0
-    current_chaos = db.session.query(func.sum(ItemSnapshot.price)).filter(
-        ItemSnapshot.target.has(user_id=user_id),
-        ItemSnapshot.price_currency == 'chaos'
-    ).scalar() or 0
-    
-    return jsonify({
-        'yesterday_divine': yesterday_divine,
-        'yesterday_chaos': yesterday_chaos,
-        'today_divine': today_divine,
-        'today_chaos': today_chaos,
-        'current_divine': current_divine,
-        'current_chaos': current_chaos
-    }), 200
-
-@api_bp.route('/events/mark_redundant', methods=['POST'])
-@jwt_required()
-def mark_redundant():
-    user_id = int(get_jwt_identity())
-    data = request.get_json()
-    event_ids = data.get('event_ids', [])
-    if not event_ids:
-        return jsonify({'msg': 'No event IDs provided'}), 400
-    # 验证这些事件属于当前用户
-    events = Event.query.filter(Event.id.in_(event_ids)).all()
-    for e in events:
-        target = MonitorTarget.query.get(e.target_id)
-        if not target or target.user_id != user_id:
-            return jsonify({'msg': 'Unauthorized'}), 403
-    # 更新标记
-    Event.query.filter(Event.id.in_(event_ids)).update(
-        {'is_redundant': True},
-        synchronize_session=False
+    target = _target(target_id)
+    query = Event.query.filter_by(target_id=target_id)
+    kind = request.args.get("event_type")
+    if kind:
+        if kind not in ["listed", "sold", "price_change"]:
+            raise BadRequest("event_type 无效")
+        query = query.filter_by(event_type=kind)
+    if "is_redundant" in request.args:
+        query = query.filter_by(is_redundant=bool(query_int("is_redundant", 0, 0, 1)))
+    before = request.args.get("before_id")
+    if before is not None:
+        query = query.filter(Event.id < query_int("before_id", 0, 1, 2147483647))
+    rows = (
+        query.order_by(Event.created_at.desc(), Event.id.desc())
+        .limit(query_int("limit", 50, 1, 2000))
+        .offset(query_int("offset", 0, 0, 10000000))
+        .all()
     )
-    db.session.commit()
-    return jsonify({'msg': 'Marked', 'count': len(event_ids)}), 200
-
-@api_bp.route('/logs', methods=['GET'])
-@jwt_required()
-def get_logs():
-    scheduler = current_app.scheduler
-    warnings = scheduler.get_warnings(limit=100)
-    return jsonify(warnings), 200
+    return jsonify([_event_json(row, target) for row in rows])
 
 
-@api_bp.route('/events/all', methods=['GET'])
+@api_bp.get("/events/all")
 @jwt_required()
 def get_all_events():
-    user_id = int(get_jwt_identity())
-    # 参数
-    is_redundant = request.args.get('is_redundant', type=int)
-    is_gem = request.args.get('is_gem', type=int)
-    since = request.args.get('since')  # ISO 时间字符串
-    limit = request.args.get('limit', 1000, type=int)
-    
-    # 基础查询：当前用户所有目标的事件
-    query = Event.query.join(MonitorTarget).filter(MonitorTarget.user_id == user_id)
-    
-    if is_redundant is not None:
-        query = query.filter(Event.is_redundant == is_redundant)
-    if is_gem is not None:
-        query = query.filter(Event.is_gem == is_gem)
-    if since:
+    query = (
+        db.session.query(Event, MonitorTarget)
+        .join(MonitorTarget)
+        .filter(MonitorTarget.user_id == int(get_jwt_identity()))
+    )
+    for name in ["is_redundant", "is_gem"]:
+        if name in request.args:
+            query = query.filter(getattr(Event, name) == bool(query_int(name, 0, 0, 1)))
+    if request.args.get("since"):
         try:
-            since_dt = datetime.fromisoformat(since)
-            query = query.filter(Event.created_at >= since_dt)
-        except ValueError:
-            return jsonify({'msg': 'since 参数格式错误，请使用 ISO 时间格式'}), 400
-    
-    # 分页
+            query = query.filter(Event.created_at >= parse_utc(request.args["since"]))
+        except ValueError as exc:
+            raise BadRequest(str(exc)) from None
     total = query.count()
-    events = query.order_by(Event.created_at.desc()).limit(limit).all()
-    
-    def _parse_mods(field):
-        if field:
-            try:
-                v = json.loads(field)
-                return v if isinstance(v, list) else []
-            except Exception:
-                return []
-        return []
+    rows = (
+        query.order_by(Event.created_at.desc(), Event.id.desc())
+        .limit(query_int("limit", 1000, 1, 2000))
+        .offset(query_int("offset", 0, 0, 10000000))
+        .all()
+    )
+    return jsonify(total=total, events=[_event_json(event, target) for event, target in rows])
 
-    return jsonify({
-        'total': total,
-        'events': [{
-            'id': e.id,
-            'target_id': e.target_id,
-            'target_name': e.target.poe_account_name,
-            'target_type': e.target.target_type,
-            'item_id': e.item_id,
-            'item_name': e.item_name,
-            'base_type': e.base_type,
-            'explicit_mods': _parse_mods(e.explicit_mods),
-            'implicit_mods': _parse_mods(e.implicit_mods),
-            'fractured_mods': _parse_mods(e.fractured_mods),
-            'crafted_mods': _parse_mods(e.crafted_mods),
-            'enchant_mods': _parse_mods(e.enchant_mods),
-            'mutated_mods': _parse_mods(e.mutated_mods),
-            'veiled_mods': _parse_mods(e.veiled_mods),
-            'price': e.price,
-            'price_old': e.price_old,
-            'price_currency': e.price_currency,
-            'event_type': e.event_type,
-            'is_redundant': e.is_redundant,
-            'is_gem': e.is_gem,
-            'seller_account': e.seller_account,
-            'created_at': e.created_at.isoformat()
-        } for e in events]
-    }), 200
 
-@api_bp.route('/targets/<int:target_id>/price_trend', methods=['GET'])
+@api_bp.post("/events/mark_redundant")
+@jwt_required()
+def mark_redundant():
+    # Older open pages must also be unable to execute the destructive cleaner.
+    return jsonify(msg="自动批量去重已停用，历史事件保留原样"), 410
+
+
+@api_bp.get("/logs")
+@jwt_required()
+def get_logs():
+    user = _user()
+    return jsonify(
+        current_app.scheduler.get_warnings(limit=100, user_id=user.id, is_admin=user.is_admin)
+    )
+
+
+@api_bp.get("/stats")
+@jwt_required()
+def get_stats():
+    yesterday, today, tomorrow = day_bounds()
+    columns = []
+    for start, end in [(yesterday, today), (today, tomorrow)]:
+        for currency in ["divine", "chaos"]:
+            columns.append(
+                _sum_when(
+                    and_(
+                        Event.created_at >= start,
+                        Event.created_at < end,
+                        Event.price_currency == currency,
+                    ),
+                    Event.price,
+                )
+            )
+    values = (
+        db.session.query(*columns)
+        .join(MonitorTarget)
+        .filter(
+            MonitorTarget.user_id == int(get_jwt_identity()),
+            Event.event_type == "sold",
+            Event.is_redundant.is_(False),
+            Event.created_at >= yesterday,
+            Event.created_at < tomorrow,
+        )
+        .one()
+    )
+    current = (
+        db.session.query(
+            *[
+                _sum_when(ItemSnapshot.price_currency == c, ItemSnapshot.price)
+                for c in ["divine", "chaos"]
+            ]
+        )
+        .join(MonitorTarget)
+        .filter(MonitorTarget.user_id == int(get_jwt_identity()))
+        .one()
+    )
+    return jsonify(
+        dict(
+            zip(
+                [
+                    "yesterday_divine",
+                    "yesterday_chaos",
+                    "today_divine",
+                    "today_chaos",
+                    "current_divine",
+                    "current_chaos",
+                ],
+                [v or 0 for v in [*values, *current]],
+            )
+        )
+    )
+
+
+@api_bp.get("/targets/<int:target_id>/price_trend")
 @jwt_required()
 def get_price_trend(target_id):
-    user_id = int(get_jwt_identity())
-    target = MonitorTarget.query.filter_by(id=target_id, user_id=user_id).first()
-    if not target:
-        return jsonify({'msg': 'Target not found'}), 404
-    
-    days = request.args.get('days', 30, type=int)
-    since = request.args.get('since', None)
-    
-    # 构建查询
-    query = PriceTrend.query.filter(PriceTrend.target_id == target_id)
-    
-    if since:
-        # 增量查询：只返回since之后的数据
+    _target(target_id)
+    days = query_int("days", 30, 1, 30)
+    now = utcnow()
+    cutoff = now - timedelta(days=days)
+    maximum = db.session.query(func.max(PriceTrend.id)).filter_by(target_id=target_id).scalar() or 0
+    start = cutoff
+    cursor = query_int("cursor_id", 0, 0, 2147483647)
+    if cursor:
+        changed = (
+            db.session.query(func.min(PriceTrend.scan_time))
+            .filter(
+                PriceTrend.target_id == target_id,
+                PriceTrend.id > cursor,
+                PriceTrend.id <= maximum,
+                PriceTrend.scan_time >= cutoff,
+            )
+            .scalar()
+        )
+        if changed is None:
+            return jsonify(
+                cursor_id=maximum,
+                window_start=iso_utc(cutoff),
+                points=[],
+                scan_times=[],
+                hours=[],
+                min_prices=[],
+                top10_avg_prices=[],
+                item_counts=[],
+            )
+        start = (
+            changed
+            if days == 1
+            else max(cutoff, changed.replace(minute=0, second=0, microsecond=0))
+        )
+    elif request.args.get("since"):
         try:
-            since_time = datetime.fromisoformat(since.replace('Z', '+00:00'))
-            query = query.filter(PriceTrend.scan_time >= since_time)
-        except:
-            # 如果时间格式错误，忽略since参数
-            pass
+            since = parse_utc(request.args["since"])
+            start = max(
+                cutoff, since if days == 1 else since.replace(minute=0, second=0, microsecond=0)
+            )
+        except ValueError as exc:
+            raise BadRequest(str(exc)) from None
+    rows = (
+        PriceTrend.query.filter(
+            PriceTrend.target_id == target_id,
+            PriceTrend.id <= maximum,
+            PriceTrend.scan_time >= start,
+            PriceTrend.scan_time <= now,
+        )
+        .order_by(PriceTrend.scan_time, PriceTrend.id)
+        .all()
+    )
+    points = []
+    if days == 1:
+        points = [
+            dict(
+                key=row.id,
+                time=iso_utc(row.scan_time),
+                min_price=row.min_price,
+                value=row.top10_avg_price,
+                count=row.item_count,
+            )
+            for row in rows
+        ]
     else:
-        # 完整查询：返回days天的数据
-        cutoff = datetime.utcnow() - timedelta(days=days)
-        query = query.filter(PriceTrend.scan_time >= cutoff)
-    
-    trends = query.order_by(PriceTrend.scan_time.asc()).all()
-    
-    # 根据时间范围决定聚合方式
-    if days <= 1:
-        # 24小时：返回原始数据（不聚合）
-        result = {
-            'scan_times': [t.scan_time.isoformat() for t in trends],
-            'min_prices': [t.min_price for t in trends],
-            'top10_avg_prices': [t.top10_avg_price for t in trends],
-            'item_counts': [t.item_count for t in trends],
-        }
-    else:
-        # 7天及以上：按小时聚合（7天=168个点）
-        from collections import defaultdict
-        hourly = defaultdict(lambda: {'min_prices': [], 'avg_prices': [], 'counts': []})
-        for t in trends:
-            hour_str = t.scan_time.strftime('%Y-%m-%d %H:00')
-            if t.min_price is not None:
-                hourly[hour_str]['min_prices'].append(t.min_price)
-            if t.top10_avg_price is not None:
-                hourly[hour_str]['avg_prices'].append(t.top10_avg_price)
-            if t.item_count is not None:
-                hourly[hour_str]['counts'].append(t.item_count)
-        
-        hours = sorted(hourly.keys())
-        result = {
-            'hours': hours,
-            'min_prices': [sum(hourly[h]['min_prices']) // len(hourly[h]['min_prices']) if hourly[h]['min_prices'] else None for h in hours],
-            'top10_avg_prices': [sum(hourly[h]['avg_prices']) // len(hourly[h]['avg_prices']) if hourly[h]['avg_prices'] else None for h in hours],
-            'item_counts': [sum(hourly[h]['counts']) // len(hourly[h]['counts']) if hourly[h]['counts'] else None for h in hours],
-        }
-    
-    return jsonify(result), 200
+        hourly = defaultdict(list)
+        for row in rows:
+            hourly[row.scan_time.replace(minute=0, second=0, microsecond=0)].append(row)
+        for hour, group in sorted(hourly.items()):
 
-@api_bp.route('/search', methods=['POST'])
+            def average(name):
+                numbers = [getattr(row, name) for row in group if getattr(row, name) is not None]
+                return (
+                    (sum(numbers, Decimal(0)) / len(numbers)).quantize(PRECISION)
+                    if numbers
+                    else None
+                )
+
+            points.append(
+                dict(
+                    key=iso_utc(hour),
+                    time=iso_utc(hour),
+                    min_price=average("min_price"),
+                    value=average("top10_avg_price"),
+                    count=average("item_count"),
+                )
+            )
+    return jsonify(
+        cursor_id=maximum,
+        window_start=iso_utc(cutoff),
+        points=points,
+        **(
+            {"scan_times": [p["time"] for p in points]}
+            if days == 1
+            else {"hours": [p["time"] for p in points]}
+        ),
+        min_prices=[p["min_price"] for p in points],
+        top10_avg_prices=[p["value"] for p in points],
+        item_counts=[p["count"] for p in points],
+    )
+
+
+def _credentials():
+    credential = db.session.get(UserCredential, int(get_jwt_identity()))
+    if credential is None or not credential.encrypted_poesessid:
+        raise BadRequest("请先设置 POESESSID 凭证")
+    result = (
+        decrypt_poesessid(credential.encrypted_poesessid),
+        decrypt_poesessid(credential.encrypted_pt2gguin) if credential.encrypted_pt2gguin else None,
+    )
+    db.session.rollback()
+    return result
+
+
+def _search_query(data):
+    if data.get("query") is not None:
+        return normalize_query(data["query"])
+    raw = {key: data[key] for key in ["type", "name", "stats"] if data.get(key)}
+    values = {
+        key.removeprefix("price_"): price(data[key])
+        for key in ["price_min", "price_max"]
+        if data.get(key) is not None
+    }
+    if values:
+        raw["filters"] = {
+            "trade_filters": {
+                "filters": {"price": {key: float(value) for key, value in values.items()}}
+            }
+        }
+    if data.get("online_only"):
+        raw["status"] = {"option": "online"}
+    return normalize_query(raw)
+
+
+@api_bp.post("/search")
 @jwt_required()
 def global_search():
-    """全服搜索: 调用腾讯 POE 市集 API"""
-    from .utils import decrypt_poesessid
-    from .poe_api import PoeAPI
-    from .models import UserCredential
-
-    user_id = int(get_jwt_identity())
-    data = request.get_json() or {}
-
-    # 获取用户凭证
-    cred = UserCredential.query.get(user_id)
-    if not cred or not cred.encrypted_poesessid:
-        return jsonify({'msg': '请先设置 POESESSID 凭证'}), 400
-
-    poesessid = decrypt_poesessid(cred.encrypted_poesessid)
-    pt2gguin = decrypt_poesessid(cred.encrypted_pt2gguin) if cred.encrypted_pt2gguin else None
-
-    league = data.get('league', 'S30赛季')
-
-    # 前端传完整 query: 转换格式后使用
-    # 否则用旧的简化参数构建 query
-    if data.get('query'):
-        raw_query = data['query']
-        query = {}
-        # 转换 name: 前端传 {"option": "xxx"} -> POE API 需要 "xxx"
-        if raw_query.get('name'):
-            if isinstance(raw_query['name'], dict) and raw_query['name'].get('option'):
-                query['name'] = raw_query['name']['option']
-            else:
-                query['name'] = raw_query['name']
-            # 从 items.json 分离 name 和 type
-            # 技能石变体（有disc字段）需要用 {option, discriminator} 格式
-            # 注意：技能石名称可能没有空格（如"大法师之力量抽取"），所以不能用空格判断
-            if not raw_query.get('type'):
-                try:
-                    import os, json as _json
-                    items_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'items.json')
-                    if os.path.exists(items_path):
-                        with open(items_path) as _f:
-                            _items = _json.load(_f)
-                        for _cat in _items.get('result', []):
-                            for _entry in _cat.get('entries', []):
-                                if _entry.get('text') == query['name']:
-                                    # 技能石变体：有disc字段，用 {option, discriminator} 格式
-                                    if _entry.get('disc'):
-                                        query['type'] = {
-                                            'option': _entry['type'],
-                                            'discriminator': _entry['disc']
-                                        }
-                                        del query['name']  # 变体不需要name字段
-                                    # 普通物品且名称含空格：分离name和type
-                                    elif ' ' in query['name']:
-                                        query['type'] = _entry['type']
-                                        query['name'] = _entry.get('name', query['name'])
-                                    break
-                            if query.get('type'):
-                                break
-                except Exception:
-                    pass
-        # 转换 type
-        if raw_query.get('type'):
-            if isinstance(raw_query['type'], dict) and raw_query['type'].get('option'):
-                query['type'] = raw_query['type']['option']
-            else:
-                query['type'] = raw_query['type']
-        # 保留 filters 和 stats（需要转换格式）
-        if raw_query.get('filters'):
-            query['filters'] = convert_filters(raw_query['filters'])
-        if raw_query.get('stats'):
-            query['stats'] = convert_stats(raw_query['stats'])
-        if raw_query.get('status'):
-            query['status'] = raw_query['status']
-    else:
-        query = {}
-        if data.get('type'):
-            query['type'] = data['type']
-        if data.get('name'):
-            query['name'] = data['name']
-        trade_filters = {}
-        if data.get('price_min') is not None or data.get('price_max') is not None:
-            price = {}
-            if data.get('price_min') is not None:
-                price['min'] = data['price_min']
-            if data.get('price_max') is not None:
-                price['max'] = data['price_max']
-            trade_filters['price'] = price
-        filters = {}
-        if trade_filters:
-            filters['trade_filters'] = trade_filters
-        if filters:
-            query['filters'] = filters
-        if data.get('stats'):
-            query['stats'] = data['stats']
-        if data.get('online_only'):
-            query['status'] = {'option': 'online'}
-
-    # 确保 query 不为空，至少添加一个空的 type
-    if not query.get('name') and not query.get('type') and not query.get('stats') and not query.get('filters'):
-        query['type'] = ''
-
+    data = body()
+    page = integer(data.get("page", 0), "page", 0, 4)
+    league = text(data.get("league", "S30赛季"), "league", 50)
+    query = _search_query(data)
+    api = PoeAPI(*_credentials())
+    api.deadline = time.monotonic() + 90
     try:
-        api = PoeAPI(poesessid, pt2gguin)
-        page = data.get('page', 0)
-        per_page = 20
-        print(f"DEBUG: Query sent to POE API: {json.dumps(query, ensure_ascii=False)}")
         result = api.search_global_items(league, query)
-
-        items = []
-        if result['item_ids']:
-            all_ids = result['item_ids']  # 最多100个
-            total = result['total']
-            start = page * per_page
-            end = start + per_page
-            page_ids = all_ids[start:end]
-            if page_ids:
-                fetched = api.fetch_items_batch(
-                    page_ids,
-                    result['query_id'],
-                    batch_size=10
-                )
-                items = fetched
-
-        return jsonify({
-            'total': result['total'],
-            'items': items,
-            'page': page,
-            'per_page': per_page,
-            'query_id': result['query_id'],
-        }), 200
-    except Exception as e:
-        return jsonify({'msg': f'搜索失败: {str(e)}'}), 500
+        ids = result["item_ids"][page * 20 : (page + 1) * 20]
+        items = api.fetch_items_batch(ids, result["query_id"], batch_size=10) if ids else []
+        return jsonify(
+            total=result["total"],
+            accessible_total=len(result["item_ids"]),
+            items=items,
+            page=page,
+            per_page=20,
+            query_id=result["query_id"],
+        )
+    except Exception:
+        current_app.logger.warning("Upstream search failed", exc_info=True)
+        return jsonify(msg="搜索失败，请检查筛选条件或凭证后重试"), 502
+    finally:
+        api.close()
 
 
-@api_bp.route('/search/monitor', methods=['POST'])
+@api_bp.post("/search/monitor")
 @jwt_required()
 def create_global_monitor():
-    """从搜索条件创建全服监控: 搜索→拿query_id→建监控目标"""
-    from .utils import decrypt_poesessid
-    from .poe_api import PoeAPI
-    from .models import UserCredential
-
-    user_id = int(get_jwt_identity())
-    data = request.get_json() or {}
-
-    # 获取用户凭证
-    cred = UserCredential.query.get(user_id)
-    if not cred or not cred.encrypted_poesessid:
-        return jsonify({'msg': '请先设置 POESESSID 凭证'}), 400
-
-    poesessid = decrypt_poesessid(cred.encrypted_poesessid)
-    pt2gguin = decrypt_poesessid(cred.encrypted_pt2gguin) if cred.encrypted_pt2gguin else None
-
-    league = data.get('league', 'S30赛季')
-    raw_query = data.get('query')
-    scan_interval = data.get('scan_interval', 300)
-
-    if not raw_query:
-        return jsonify({'msg': '缺少筛选条件 query'}), 400
-
-    # 转换 query 格式
-    query = {}
-    # 转换 name: 前端传 {"option": "xxx"} -> POE API 需要 "xxx"
-    if raw_query.get('name'):
-        if isinstance(raw_query['name'], dict) and raw_query['name'].get('option'):
-            query['name'] = raw_query['name']['option']
-        else:
-            query['name'] = raw_query['name']
-    # 转换 type
-    if raw_query.get('type'):
-        if isinstance(raw_query['type'], dict) and raw_query['type'].get('option'):
-            query['type'] = raw_query['type']['option']
-        else:
-            query['type'] = raw_query['type']
-    # 保留 filters 和 stats（需要转换格式）
-    if raw_query.get('filters'):
-        query['filters'] = convert_filters(raw_query['filters'])
-    if raw_query.get('stats'):
-        query['stats'] = convert_stats(raw_query['stats'])
-    if raw_query.get('status'):
-        query['status'] = raw_query['status']
-
-    # 确保 query 不为空，至少添加一个空的 type
-    if not query.get('name') and not query.get('type') and not query.get('stats') and not query.get('filters'):
-        query['type'] = ''
-
-    # 校验扫描间隔
-    user = User.query.get(user_id)
-    min_interval = 60 if user.is_admin else 300
-    if scan_interval < min_interval:
-        return jsonify({'msg': f'扫描间隔不能小于 {min_interval} 秒'}), 400
-
+    data = body()
+    minimum = 60 if _user().is_admin else 300
+    interval = integer(data.get("scan_interval", 300), "scan_interval", minimum, 86400)
+    league = text(data.get("league", "S30赛季"), "league", 50)
+    if not data.get("query"):
+        raise BadRequest("缺少筛选条件 query")
+    query = normalize_query(data["query"])
+    api = PoeAPI(*_credentials())
+    api.deadline = time.monotonic() + 90
     try:
-        api = PoeAPI(poesessid, pt2gguin)
-        # 1. 搜索获取 query_id
-        print(f"DEBUG [monitor]: Query sent to POE API: {json.dumps(query, ensure_ascii=False)}")
         result = api.search_global_items(league, query)
-        query_id = result['query_id']
-        total = result['total']
-        item_ids = result['item_ids']
-
-        if not item_ids or total == 0:
-            return jsonify({'msg': '未找到匹配物品，请调整筛选条件', 'total': 0}), 400
-
-        # 2. 获取前10个物品的详情（用于初始显示）
-        preview_items = api.fetch_items_batch(item_ids[:10], query_id, batch_size=10)
-
-        # 3. 计算前10均价
-        prices = []
-        for item_data in preview_items:
-            listing = item_data.get('listing', {})
-            price_info = listing.get('price', {})
-            if price_info.get('currency') == 'divine':
-                prices.append(price_info.get('amount', 0))
-        top10_avg = sum(prices) // len(prices) if prices else 0
-
-        # 4. 创建监控目标
-        query_params = dict(query)
-        query_params['_query_id'] = query_id  # 存储短代码供后续复用
-        target = MonitorTarget(
-            user_id=user_id,
-            poe_account_name=None,
-            league=league,
-            scan_interval=scan_interval,
-            min_price=None,
-            target_type='global',
-            query_params=query_params,
-        )
-        db.session.add(target)
-        db.session.commit()
-
-        # 5. 触发立即扫描
-        scheduler = current_app.scheduler
-        scheduler.trigger_immediate_scan(target.id)
-
-        return jsonify({
-            'id': target.id,
-            'query_id': query_id,
-            'total': total,
-            'top10_avg': top10_avg,
-            'preview_items': preview_items[:10],
-            'msg': '监控任务创建成功'
-        }), 201
-
-    except Exception as e:
-        return jsonify({'msg': f'创建监控失败: {str(e)}'}), 500
+        if not result["item_ids"] or result["total"] == 0:
+            return jsonify(msg="未找到匹配物品，请调整筛选条件", total=0), 400
+        ids = result["item_ids"][:10]
+        preview = api.fetch_items_batch(ids, result["query_id"], batch_size=10)
+        validate_details(ids, preview)
+    except Exception:
+        current_app.logger.warning("Monitor preview failed", exc_info=True)
+        return jsonify(msg="创建监控失败，请稍后重试"), 502
+    finally:
+        api.close()
+    target = MonitorTarget(
+        user_id=int(get_jwt_identity()),
+        poe_account_name=None,
+        target_type="global",
+        league=league,
+        scan_interval=interval,
+        query_params={**query, "_query_id": result["query_id"]},
+    )
+    db.session.add(target)
+    db.session.flush()
+    current_app.scheduler.trigger_immediate_scan(target.id, commit=False)
+    db.session.commit()
+    prices = [
+        money(row["listing"]["price"]["amount"])
+        for row in preview
+        if row["listing"]["price"]["currency"] == "divine"
+    ]
+    return jsonify(
+        id=target.id,
+        query_id=result["query_id"],
+        total=result["total"],
+        preview_items=preview,
+        top10_avg=(sum(prices, Decimal(0)) / len(prices)).quantize(PRECISION) if prices else 0,
+        msg="监控任务创建成功",
+    ), 201
 
 
-@api_bp.route('/trade/static', methods=['GET'])
+@api_bp.get("/trade/static")
 def trade_static():
-    """代理腾讯 trade data/static 接口 (物品分类/传奇物品)，带缓存"""
-    return _cached_trade_response('static.json', 'https://poe.game.qq.com/api/trade/data/static', 'static')
+    return _cached_trade_response(
+        "static.json", "https://poe.game.qq.com/api/trade/data/static", "static"
+    )
 
 
-@api_bp.route('/trade/stats', methods=['GET'])
+@api_bp.get("/trade/stats")
 def trade_stats():
-    """代理腾讯 trade data/stats 接口 (词缀筛选配置)，带缓存"""
-    return _cached_trade_response('stats.json', 'https://poe.game.qq.com/api/trade/data/stats', 'stats')
+    return _cached_trade_response(
+        "stats.json", "https://poe.game.qq.com/api/trade/data/stats", "stats"
+    )
+
+
+@api_bp.get("/trade/filters")
+def trade_filters():
+    return _cached_trade_response(
+        "filters.json", "https://poe.game.qq.com/api/trade/data/filters", "filters"
+    )
