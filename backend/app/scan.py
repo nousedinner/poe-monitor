@@ -1,6 +1,7 @@
 """Fetch first, then atomically diff a complete response against its own target."""
 
 from copy import deepcopy
+from datetime import timedelta
 from decimal import Decimal
 from collections import defaultdict
 from . import db
@@ -12,23 +13,43 @@ from .utils import decrypt_poesessid
 
 
 def match_instances(old, new):
-    """Match listing IDs first, then only a unique upstream physical item ID.
+    """Keep instances separate while recognizing non-gem relistings.
 
-    Equal fingerprints alone never merge distinct instances or rewrite history.
+    Both IDs can change when an item is relisted. Non-gems therefore retain
+    fingerprint matching; gems use listing IDs, as in the original scanner.
+    Lists preserve quantities when several non-gems share one fingerprint.
     """
     pairs = {key: key for key in old.keys() & new.keys()}
-    old_stable, new_stable = defaultdict(list), defaultdict(list)
+    old_fingerprints, new_fingerprints = defaultdict(list), defaultdict(list)
     for key in old.keys() - pairs.keys():
-        stable = (old[key].item_data or {}).get("item", {}).get("id")
-        if stable:
-            old_stable[stable].append(key)
+        info = old[key].item_data["item"]
+        if info.get("frameType") != 4:
+            old_fingerprints[fingerprint(info)].append(key)
     for key in new.keys() - set(pairs.values()):
-        stable = new[key]["item"].get("id")
-        if stable:
-            new_stable[stable].append(key)
-    for stable in old_stable.keys() & new_stable.keys():
-        if len(old_stable[stable]) == len(new_stable[stable]) == 1:
-            pairs[old_stable[stable][0]] = new_stable[stable][0]
+        info = new[key]["item"]
+        if info.get("frameType") != 4:
+            new_fingerprints[fingerprint(info)].append(key)
+    for fp in old_fingerprints.keys() & new_fingerprints.keys():
+        remaining_old = sorted(old_fingerprints[fp])
+        remaining_new = sorted(new_fingerprints[fp])
+        # Preserve unchanged quotes first, so reordering identical instances
+        # does not manufacture price changes. Pair each instance at most once.
+        for old_id in remaining_old[:]:
+            previous = old[old_id]
+            match = next(
+                (
+                    key
+                    for key in remaining_new
+                    if item_values(new[key])["price"] == previous.price
+                    and new[key]["listing"]["price"]["currency"] == previous.price_currency
+                ),
+                None,
+            )
+            if match is not None:
+                pairs[old_id] = match
+                remaining_old.remove(old_id)
+                remaining_new.remove(match)
+        pairs.update(zip(remaining_old, remaining_new))
     return pairs
 
 
@@ -130,8 +151,12 @@ class Scanner:
                         created_at=now,
                     )
                 )
-            for new_id in new.keys() - set(pairs.values()):
-                self.add_event(target.id, new[new_id], "listed", now)
+            for new_id in sorted(new.keys() - set(pairs.values())):
+                raw = new[new_id]
+                if target.target_type != "account" or not self.correct_relisting(
+                    target.id, raw, now
+                ):
+                    self.add_event(target.id, raw, "listed", now)
             for old_id, new_id in pairs.items():
                 values = item_values(new[new_id])
                 previous = old[old_id]
@@ -178,6 +203,46 @@ class Scanner:
         target.last_scan = now
         target.baseline_reset = False
         db.session.commit()
+        return True
+
+    @staticmethod
+    def correct_relisting(target_id, raw, now):
+        """Restore the original account backtracking policy, including its windows.
+
+        Relisting can change both listing ID and item.id. The fingerprint is
+        deliberately used across IDs to retract the disappearance observation.
+        Original backend policy: non-gems 24 hours, gems 10 minutes. The old
+        frontend's gem exclusion was a separate historical-cleanup mechanism.
+        """
+        is_gem = raw["item"].get("frameType") == 4
+        cutoff = now - (timedelta(minutes=10) if is_gem else timedelta(hours=24))
+        fp = fingerprint(raw["item"])
+        recent_sold = (
+            Event.query.filter(
+                Event.target_id == target_id,
+                Event.fingerprint_hash == fp,
+                Event.event_type == "sold",
+                Event.created_at >= cutoff,
+            )
+            .order_by(Event.created_at.desc(), Event.id.desc())
+            .first()
+        )
+        if recent_sold is None:
+            return False
+        values = item_values(raw)
+        if (
+            recent_sold.price == values["price"]
+            and recent_sold.price_currency == values["price_currency"]
+        ):
+            db.session.delete(recent_sold)
+        else:
+            recent_sold.event_type = "price_change"
+            recent_sold.price_old = recent_sold.price
+            recent_sold.price_currency_old = recent_sold.price_currency
+            recent_sold.price = values["price"]
+            recent_sold.price_currency = values["price_currency"]
+            recent_sold.is_gem = is_gem
+            recent_sold.fingerprint_hash = fp
         return True
 
     @staticmethod

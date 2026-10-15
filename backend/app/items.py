@@ -1,4 +1,4 @@
-"""Shared, version-compatible item parsing. Fingerprints are metadata, not IDs."""
+"""Shared item parsing and fingerprints for account relisting across changing IDs."""
 
 from decimal import Decimal, InvalidOperation
 import hashlib

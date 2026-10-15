@@ -32,7 +32,7 @@ def test_price_change_metadata_currency_and_fraction(app, target, fake_api):
     assert fake_api.closed
 
 
-def test_identical_instances_and_legitimate_repeated_sales(app, target, fake_api):
+def test_identical_instances_and_repeated_sales_outside_backtrack_window(app, target, fake_api):
     target_id = target.id
     fake_api.items = [raw_item("A", "Same"), raw_item("B", "Same")]
     scan(app, target, fake_api)
@@ -40,6 +40,12 @@ def test_identical_instances_and_legitimate_repeated_sales(app, target, fake_api
     fake_api.items = [raw_item("B", "Same")]
     scan(app, db.session.get(MonitorTarget, target_id), fake_api)
     assert Event.query.filter_by(event_type="sold", item_id="A").count() == 1
+    # Within 24 hours the original ordinary-item rule treats the same
+    # fingerprint as relisting. Outside that window it remains a new listing.
+    Event.query.filter_by(event_type="sold", item_id="A").one().created_at = utcnow() - timedelta(
+        hours=25
+    )
+    db.session.commit()
     fake_api.items = [raw_item("B", "Same"), raw_item("C", "Same")]
     scan(app, db.session.get(MonitorTarget, target_id), fake_api)
     assert Event.query.filter_by(event_type="listed", item_id="C").count() == 1
@@ -80,19 +86,20 @@ def test_currency_only_change_is_recorded(app, target, fake_api):
     assert Event.query.one().price_currency_old == "divine"
 
 
-def test_stable_physical_id_can_match_changed_listing(app, target, fake_api):
+def test_relisting_with_both_ids_changed_can_record_price_change(app, target, fake_api):
     snapshot(target, raw_item("old", "Alpha", 10, stable="physical-A"))
-    fake_api.items = [raw_item("new", "Alpha", 12, stable="physical-A")]
+    fake_api.items = [raw_item("new", "Alpha", 12, stable="physical-B")]
     scan(app, target, fake_api)
     assert Event.query.one().event_type == "price_change"
     assert ItemSnapshot.query.one().item_id == "new"
 
 
-def test_same_fingerprint_different_id_does_not_erase_history(app, target, fake_api):
+def test_same_fingerprint_changed_id_does_not_manufacture_a_sale(app, target, fake_api):
     snapshot(target, raw_item("old", "Same"))
     fake_api.items = [raw_item("new", "Same")]
     scan(app, target, fake_api)
-    assert sorted(row.event_type for row in Event.query.all()) == ["listed", "sold"]
+    assert Event.query.count() == 0
+    assert ItemSnapshot.query.one().item_id == "new"
 
 
 def test_query_id_persists_and_mean_keeps_fraction(app, target, fake_api):
